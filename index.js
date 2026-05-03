@@ -104,417 +104,394 @@ app.get('/online', (req, res) => {
     res.json({ players, stats: { ...getStats(), record: stats.record } });
 });
 
-// ---------- Утилиты ----------
-const NEON_COLORS = [
-    { hex: '#a78bfa', rgb: '167,139,250' },  // фиолетовый
-    { hex: '#f472b6', rgb: '244,114,182' },  // розовый
-    { hex: '#22d3ee', rgb: '34,211,238' },   // циан
-    { hex: '#fb923c', rgb: '251,146,60' },   // оранжевый
-    { hex: '#4ade80', rgb: '74,222,128' },   // зелёный
-    { hex: '#facc15', rgb: '250,204,21' },   // жёлтый
-];
-
-function colorForName(name) {
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-    return NEON_COLORS[Math.abs(hash) % NEON_COLORS.length];
-}
-
 function initials(name) {
     return name.slice(0, 2).toUpperCase();
 }
 
 function formatDate(ts) {
     if (!ts) return '—';
-    return new Date(ts).toLocaleString('ru-RU', {
+    return new Date(ts).toLocaleString('en-US', {
         timeZone: 'Asia/Almaty',
-        day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-    }).replace(',', ' /');
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
+    });
 }
 
 function formatTime(ts) {
     if (!ts) return '';
-    return new Date(ts).toLocaleString('ru-RU', {
+    return new Date(ts).toLocaleString('en-US', {
         timeZone: 'Asia/Almaty',
-        hour: '2-digit', minute: '2-digit'
+        hour: '2-digit', minute: '2-digit', hour12: false
     });
+}
+
+function trendText(trend) {
+    if (trend > 0) return `+${trend} in the last hour`;
+    if (trend < 0) return `${trend} in the last hour`;
+    return 'Steady activity';
 }
 
 function buildSparkline(samples) {
     if (samples.length < 2) {
-        return `<div style="color:rgba(167,139,250,0.5);font-size:11px;text-align:center;padding:30px 0;letter-spacing:0.2em;">
-                    >> COLLECTING_DATA...
+        return `<div style="color:rgba(255,255,255,0.2);font-size:12px;text-align:center;padding:30px 0;font-weight:300;letter-spacing:0.05em;">
+                    Collecting data
                 </div>`;
     }
 
-    const W = 600, H = 140;
+    const W = 600, H = 100;
     const max = Math.max(...samples.map(s => s.count), 1);
 
     const points = samples.map((s, i) => {
         const x = (i / (samples.length - 1)) * W;
-        const y = H - 20 - (s.count / max) * (H - 40);
+        const y = H - 15 - (s.count / max) * (H - 30);
         return [x, y];
     });
 
     const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-    const areaPath = `${linePath} L ${W},${H} L 0,${H} Z`;
 
     const peakIdx = samples.reduce((maxI, s, i) => s.count > samples[maxI].count ? i : maxI, 0);
     const peakPt = points[peakIdx];
 
     return `
         <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;">
-            <defs>
-                <linearGradient id="neonarea" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.5"/>
-                    <stop offset="100%" stop-color="#a78bfa" stop-opacity="0"/>
-                </linearGradient>
-                <filter id="glow">
-                    <feGaussianBlur stdDeviation="3" result="blur"/>
-                    <feMerge>
-                        <feMergeNode in="blur"/>
-                        <feMergeNode in="SourceGraphic"/>
-                    </feMerge>
-                </filter>
-            </defs>
-            <line x1="0" y1="35" x2="${W}" y2="35" stroke="rgba(167,139,250,0.1)" stroke-width="1" stroke-dasharray="2,4"/>
-            <line x1="0" y1="70" x2="${W}" y2="70" stroke="rgba(167,139,250,0.1)" stroke-width="1" stroke-dasharray="2,4"/>
-            <line x1="0" y1="105" x2="${W}" y2="105" stroke="rgba(167,139,250,0.1)" stroke-width="1" stroke-dasharray="2,4"/>
-            <path d="${areaPath}" fill="url(#neonarea)"/>
-            <path d="${linePath}" stroke="#a78bfa" stroke-width="2" fill="none" filter="url(#glow)"/>
-            <circle cx="${peakPt[0].toFixed(1)}" cy="${peakPt[1].toFixed(1)}" r="5" fill="#f472b6" filter="url(#glow)"/>
+            <path d="${linePath}" stroke="rgba(255,255,255,0.5)" stroke-width="1" fill="none" stroke-linejoin="round"/>
+            <circle cx="${peakPt[0].toFixed(1)}" cy="${peakPt[1].toFixed(1)}" r="6" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+            <circle cx="${peakPt[0].toFixed(1)}" cy="${peakPt[1].toFixed(1)}" r="3" fill="#fff"/>
         </svg>
     `;
 }
 
-// ---------- Страничка ----------
 app.get('/', (req, res) => {
     cleanupOffline();
     const players = Array.from(onlinePlayers.values());
     const s = getStats();
 
-    const trendEl = s.trend > 0
-        ? `<div style="color:#4ade80;font-size:10px;margin-top:6px;text-shadow:0 0 6px rgba(74,222,128,0.6);letter-spacing:0.1em;">▲ +${s.trend} / 1H</div>`
-        : s.trend < 0
-            ? `<div style="color:#f87171;font-size:10px;margin-top:6px;text-shadow:0 0 6px rgba(248,113,113,0.6);letter-spacing:0.1em;">▼ ${s.trend} / 1H</div>`
-            : `<div style="color:rgba(167,139,250,0.5);font-size:10px;margin-top:6px;letter-spacing:0.1em;">— STABLE</div>`;
-
-    const playerRows = players.map(p => {
-        const c = colorForName(p.name);
+    const playerRows = players.map((p, i) => {
+        const isLast = i === players.length - 1;
         return `
-            <div class="player-row" style="display:flex;align-items:center;gap:14px;padding:10px 12px;border-left:2px solid transparent;transition:all 0.2s;"
-                 onmouseover="this.style.background='rgba(${c.rgb},0.05)';this.style.borderLeftColor='${c.hex}'"
-                 onmouseout="this.style.background='transparent';this.style.borderLeftColor='transparent'">
-                <div style="width:34px;height:34px;border:1.5px solid ${c.hex};background:rgba(${c.rgb},0.1);display:flex;align-items:center;justify-content:center;color:${c.hex};font-size:12px;font-weight:bold;box-shadow:0 0 10px rgba(${c.rgb},0.3);flex-shrink:0;">
-                    ${initials(p.name)}
+            <div class="player-row" style="${isLast ? '' : 'border-bottom: 1px solid rgba(255,255,255,0.05);'}">
+                <div class="player-info">
+                    <div class="player-avatar">${initials(p.name)}</div>
+                    <div>
+                        <div class="player-name">${p.name}</div>
+                        <div class="player-uuid">${p.uuid.slice(0, 8)}...</div>
+                    </div>
                 </div>
-                <div style="flex:1;min-width:0;">
-                    <div style="color:#fff;font-size:13px;font-weight:bold;letter-spacing:0.05em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${p.name}</div>
-                    <div style="color:rgba(167,139,250,0.5);font-size:10px;font-family:'Courier New',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">UID :: ${p.uuid}</div>
-                </div>
-                <div style="color:#4ade80;font-size:10px;text-shadow:0 0 6px rgba(74,222,128,0.6);letter-spacing:0.2em;flex-shrink:0;">● ON</div>
+                <div class="player-status"></div>
             </div>
         `;
     }).join('');
 
     const emptyState = `
-        <div style="text-align:center;padding:40px 20px;color:rgba(167,139,250,0.5);font-size:11px;letter-spacing:0.3em;">
-            >> NO_PLAYERS_DETECTED
+        <div style="text-align:center;padding:40px 0;color:rgba(255,255,255,0.3);font-size:13px;font-weight:300;">
+            No players online
         </div>
     `;
 
-    const peakTime = s.peak24h.t ? formatTime(s.peak24h.t) : '--:--';
+    const peakLabel = s.peak24h.count > 0
+        ? `Peak ${s.peak24h.count} at ${formatTime(s.peak24h.t)}`
+        : 'Awaiting first peak';
 
     res.send(`<!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ROCKSNOW :: ONLINE</title>
+    <title>Rocksnow</title>
     <meta http-equiv="refresh" content="5">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500&display=swap" rel="stylesheet">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { background: #000; }
         body {
-            background: #05050d;
             color: #fff;
-            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-family: 'Inter', -apple-system, sans-serif;
             min-height: 100vh;
-            padding: 24px 16px;
             -webkit-font-smoothing: antialiased;
             position: relative;
             overflow-x: hidden;
         }
 
-        /* Сетка на фоне */
-        body::before {
-            content: '';
+        .ambient {
             position: fixed;
             inset: 0;
-            background-image:
-                linear-gradient(rgba(167,139,250,0.04) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(167,139,250,0.04) 1px, transparent 1px);
-            background-size: 40px 40px;
             pointer-events: none;
             z-index: 0;
         }
 
-        /* Вспышки света */
-        body::after {
-            content: '';
-            position: fixed;
-            top: -50%;
-            left: -50%;
-            width: 200%;
-            height: 200%;
-            background:
-                radial-gradient(circle at 20% 30%, rgba(167,139,250,0.08), transparent 40%),
-                radial-gradient(circle at 80% 70%, rgba(244,114,182,0.06), transparent 40%);
-            pointer-events: none;
-            z-index: 0;
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 40px 32px 60px;
+            position: relative;
+            z-index: 1;
         }
 
-        .container { max-width: 720px; margin: 0 auto; position: relative; z-index: 1; }
-
-        /* Header */
         .header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 28px;
+            margin-bottom: 80px;
         }
-        .logo { display: flex; align-items: center; gap: 14px; }
-        .logo-icon {
-            width: 44px; height: 44px;
-            border: 1.5px solid #a78bfa;
-            background: rgba(167,139,250,0.1);
-            display: flex; align-items: center; justify-content: center;
-            font-size: 22px;
-            box-shadow: 0 0 20px rgba(167,139,250,0.5), inset 0 0 10px rgba(167,139,250,0.2);
-            transform: rotate(45deg);
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        .logo-icon span {
-            transform: rotate(-45deg);
-            color: #a78bfa;
-            text-shadow: 0 0 8px #a78bfa;
-        }
-        .logo-title {
-            font-family: 'Orbitron', sans-serif;
-            font-size: 22px;
-            font-weight: 900;
-            letter-spacing: 0.15em;
-            text-shadow: 0 0 12px rgba(167,139,250,0.8);
-        }
-        .logo-sub {
-            color: #a78bfa;
-            font-size: 10px;
-            letter-spacing: 0.3em;
-            text-transform: uppercase;
-            opacity: 0.7;
+        .logo-icon { display: flex; align-items: center; justify-content: center; }
+        .logo-name {
+            color: #fff;
+            font-size: 14px;
+            font-weight: 400;
+            letter-spacing: 0.02em;
         }
         .live-badge {
-            display: flex; align-items: center; gap: 10px;
-            padding: 8px 14px;
-            border: 1px solid #4ade80;
-            background: rgba(74,222,128,0.05);
-            box-shadow: 0 0 15px rgba(74,222,128,0.3), inset 0 0 8px rgba(74,222,128,0.1);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 100px;
         }
         .live-dot {
-            width: 8px; height: 8px;
+            width: 6px; height: 6px;
+            border-radius: 50%;
             background: #4ade80;
-            box-shadow: 0 0 8px #4ade80;
-            animation: pulse 1.5s ease-in-out infinite;
+            animation: livePulse 2s ease-in-out infinite;
+        }
+        @keyframes livePulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
         }
         .live-text {
-            color: #4ade80;
-            font-size: 11px;
-            font-weight: bold;
-            letter-spacing: 0.2em;
-            text-shadow: 0 0 6px #4ade80;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; box-shadow: 0 0 8px #4ade80; }
-            50% { opacity: 0.4; box-shadow: 0 0 16px #4ade80; }
+            color: rgba(255,255,255,0.7);
+            font-size: 12px;
+            font-weight: 400;
         }
 
-        /* Stat cards */
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 10px;
-            margin-bottom: 20px;
+        .hero {
+            text-align: center;
+            margin: 80px 0 100px;
+        }
+        .hero-label {
+            color: rgba(255,255,255,0.4);
+            font-size: 13px;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            margin-bottom: 24px;
+            font-weight: 300;
+        }
+        .hero-value {
+            color: #fff;
+            font-size: 120px;
+            font-weight: 200;
+            line-height: 1;
+            letter-spacing: -0.04em;
         }
         @media (max-width: 600px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .hero-value { font-size: 88px; }
         }
-        .stat-card {
-            border: 1px solid;
-            padding: 14px;
-            position: relative;
-            transition: transform 0.2s;
+        .hero-sub {
+            color: rgba(255,255,255,0.4);
+            font-size: 14px;
+            margin-top: 24px;
+            font-weight: 300;
         }
-        .stat-card:hover { transform: translateY(-2px); }
-        .stat-card .corner {
-            position: absolute;
-            width: 12px; height: 12px;
-        }
-        .stat-card .corner-tl { top: -1px; left: -1px; border-top: 2px solid; border-left: 2px solid; }
-        .stat-card .corner-br { bottom: -1px; right: -1px; border-bottom: 2px solid; border-right: 2px solid; }
-        .stat-card.purple { border-color: rgba(167,139,250,0.4); background: linear-gradient(135deg, rgba(167,139,250,0.08), transparent); box-shadow: 0 0 20px rgba(167,139,250,0.15); }
-        .stat-card.purple .corner { border-color: #a78bfa; }
-        .stat-card.pink { border-color: rgba(244,114,182,0.4); background: linear-gradient(135deg, rgba(244,114,182,0.08), transparent); box-shadow: 0 0 20px rgba(244,114,182,0.15); }
-        .stat-card.pink .corner { border-color: #f472b6; }
-        .stat-card.cyan { border-color: rgba(34,211,238,0.4); background: linear-gradient(135deg, rgba(34,211,238,0.08), transparent); box-shadow: 0 0 20px rgba(34,211,238,0.15); }
-        .stat-card.cyan .corner { border-color: #22d3ee; }
-        .stat-card.orange { border-color: rgba(251,146,60,0.4); background: linear-gradient(135deg, rgba(251,146,60,0.08), transparent); box-shadow: 0 0 20px rgba(251,146,60,0.15); }
-        .stat-card.orange .corner { border-color: #fb923c; }
 
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1px;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 56px;
+        }
+        @media (max-width: 600px) {
+            .stats-row { grid-template-columns: 1fr; }
+        }
+        .stat-cell {
+            background: #000;
+            padding: 28px 24px;
+        }
         .stat-label {
-            font-size: 9px;
-            letter-spacing: 0.25em;
-            margin-bottom: 8px;
-            opacity: 0.8;
+            color: rgba(255,255,255,0.4);
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            margin-bottom: 14px;
+            font-weight: 300;
         }
         .stat-value {
             color: #fff;
-            font-family: 'Orbitron', sans-serif;
-            font-size: 32px;
-            font-weight: 700;
+            font-size: 36px;
+            font-weight: 200;
             line-height: 1;
+            letter-spacing: -0.02em;
         }
         .stat-sub {
-            font-size: 10px;
-            margin-top: 6px;
-            opacity: 0.7;
-            letter-spacing: 0.1em;
-        }
-        .purple .stat-label, .purple .stat-sub { color: #a78bfa; }
-        .pink .stat-label, .pink .stat-sub { color: #f472b6; }
-        .cyan .stat-label, .cyan .stat-sub { color: #22d3ee; }
-        .orange .stat-label, .orange .stat-sub { color: #fb923c; }
-        .purple .stat-value { text-shadow: 0 0 12px rgba(167,139,250,0.6); }
-        .pink .stat-value { text-shadow: 0 0 12px rgba(244,114,182,0.6); }
-        .cyan .stat-value { text-shadow: 0 0 12px rgba(34,211,238,0.6); }
-        .orange .stat-value { text-shadow: 0 0 12px rgba(251,146,60,0.6); }
-
-        /* Panels */
-        .panel {
-            border: 1px solid rgba(167,139,250,0.3);
-            background: rgba(10,10,20,0.6);
-            box-shadow: 0 0 20px rgba(167,139,250,0.1);
-            margin-bottom: 20px;
-        }
-        .panel-header {
-            padding: 14px 18px;
-            border-bottom: 1px solid rgba(167,139,250,0.2);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .panel-title {
-            color: #a78bfa;
+            color: rgba(255,255,255,0.3);
             font-size: 11px;
-            letter-spacing: 0.25em;
-            font-weight: bold;
-        }
-        .panel-meta {
-            font-size: 10px;
-            letter-spacing: 0.15em;
+            margin-top: 10px;
+            font-weight: 300;
         }
 
-        .chart-wrap { padding: 18px; }
-        .chart-axis {
+        .chart-section {
+            margin-bottom: 48px;
+        }
+        .section-head {
             display: flex;
             justify-content: space-between;
-            margin-top: 8px;
-            color: rgba(167,139,250,0.5);
-            font-size: 10px;
+            align-items: baseline;
+            margin-bottom: 24px;
+        }
+        .section-label {
+            color: rgba(255,255,255,0.6);
+            font-size: 12px;
             letter-spacing: 0.1em;
+            text-transform: uppercase;
+            font-weight: 300;
+        }
+        .section-meta {
+            color: rgba(255,255,255,0.3);
+            font-size: 11px;
+            font-weight: 300;
+        }
+
+        .players-section {
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding-top: 32px;
+        }
+        .player-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 0;
+            transition: padding-left 0.2s;
+        }
+        .player-row:hover { padding-left: 8px; }
+        .player-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .player-avatar {
+            width: 32px; height: 32px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.06);
+            border: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: rgba(255,255,255,0.7);
+            font-size: 11px;
+            font-weight: 400;
+        }
+        .player-name {
+            color: #fff;
+            font-size: 14px;
+            font-weight: 400;
+        }
+        .player-uuid {
+            color: rgba(255,255,255,0.3);
+            font-size: 11px;
+            font-family: 'SF Mono', Menlo, monospace;
+            margin-top: 2px;
+        }
+        .player-status {
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: #4ade80;
         }
 
         .footer {
             text-align: center;
-            color: rgba(167,139,250,0.4);
-            font-size: 10px;
-            margin-top: 24px;
-            letter-spacing: 0.3em;
+            color: rgba(255,255,255,0.2);
+            font-size: 11px;
+            margin-top: 48px;
+            font-weight: 300;
+            letter-spacing: 0.05em;
         }
     </style>
 </head>
 <body>
+
+    <svg class="ambient" viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid slice">
+        <defs>
+            <radialGradient id="ambientGlow" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#ffffff" stop-opacity="0.08"/>
+                <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+            </radialGradient>
+        </defs>
+        <ellipse cx="1100" cy="200" rx="500" ry="350" fill="url(#ambientGlow)"/>
+        <path d="M -100,300 Q 700,80 1500,400" stroke="rgba(255,255,255,0.08)" stroke-width="0.5" fill="none"/>
+        <path d="M -100,400 Q 700,180 1500,500" stroke="rgba(255,255,255,0.06)" stroke-width="0.5" fill="none"/>
+        <path d="M -100,500 Q 700,280 1500,600" stroke="rgba(255,255,255,0.04)" stroke-width="0.5" fill="none"/>
+        <path d="M -100,250 Q 700,30 1500,350" stroke="rgba(255,255,255,0.03)" stroke-width="0.5" fill="none"/>
+    </svg>
+
     <div class="container">
+
         <div class="header">
             <div class="logo">
-                <div class="logo-icon"><span>❄</span></div>
-                <div>
-                    <div class="logo-title">ROCKSNOW</div>
-                    <div class="logo-sub">// online_monitor.exe</div>
+                <div class="logo-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                        <path d="M12 2 L14 9 L21 9 L15.5 13.5 L17.5 21 L12 16.5 L6.5 21 L8.5 13.5 L3 9 L10 9 Z" stroke="#fff" stroke-width="1" fill="none"/>
+                    </svg>
                 </div>
+                <span class="logo-name">Rocksnow</span>
             </div>
             <div class="live-badge">
                 <div class="live-dot"></div>
-                <span class="live-text">● LIVE</span>
+                <span class="live-text">Live</span>
             </div>
         </div>
 
-        <div class="stats-grid">
-            <div class="stat-card purple">
-                <div class="corner corner-tl"></div>
-                <div class="corner corner-br"></div>
-                <div class="stat-label">[ ONLINE ]</div>
-                <div class="stat-value">${players.length}</div>
-                ${trendEl}
-            </div>
-            <div class="stat-card pink">
-                <div class="corner corner-tl"></div>
-                <div class="corner corner-br"></div>
-                <div class="stat-label">[ RECORD ]</div>
+        <div class="hero">
+            <div class="hero-label">Players online</div>
+            <div class="hero-value">${players.length}</div>
+            <div class="hero-sub">${trendText(s.trend)}</div>
+        </div>
+
+        <div class="stats-row">
+            <div class="stat-cell">
+                <div class="stat-label">Record</div>
                 <div class="stat-value">${stats.record.count}</div>
                 <div class="stat-sub">${formatDate(stats.record.timestamp)}</div>
             </div>
-            <div class="stat-card cyan">
-                <div class="corner corner-tl"></div>
-                <div class="corner corner-br"></div>
-                <div class="stat-label">[ AVG_24H ]</div>
+            <div class="stat-cell">
+                <div class="stat-label">24h average</div>
                 <div class="stat-value">${s.last24h}</div>
-                <div class="stat-sub">PER 24 HOURS</div>
+                <div class="stat-sub">Last 24 hours</div>
             </div>
-            <div class="stat-card orange">
-                <div class="corner corner-tl"></div>
-                <div class="corner corner-br"></div>
-                <div class="stat-label">[ AVG_ALL ]</div>
+            <div class="stat-cell">
+                <div class="stat-label">All time</div>
                 <div class="stat-value">${s.allTime}</div>
-                <div class="stat-sub">${stats.totalSamples} SAMPLES</div>
+                <div class="stat-sub">${stats.totalSamples.toLocaleString('en-US')} samples</div>
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">
-                <div class="panel-title">>> TRAFFIC_24H.LOG</div>
-                <div class="panel-meta" style="color:#f472b6;text-shadow:0 0 6px rgba(244,114,182,0.5);">
-                    PEAK :: ${s.peak24h.count} @ ${peakTime}
-                </div>
+        <div class="chart-section">
+            <div class="section-head">
+                <div class="section-label">Activity / 24h</div>
+                <div class="section-meta">${peakLabel}</div>
             </div>
-            <div class="chart-wrap">
-                ${buildSparkline(s.recent)}
-            </div>
+            ${buildSparkline(s.recent)}
         </div>
 
-        <div class="panel">
-            <div class="panel-header">
-                <div class="panel-title">>> PLAYERS.DAT</div>
-                <div class="panel-meta" style="color:#4ade80;text-shadow:0 0 6px rgba(74,222,128,0.5);">
-                    [ ${players.length} ACTIVE ]
-                </div>
+        <div class="players-section">
+            <div class="section-head">
+                <div class="section-label">Players</div>
+                <div class="section-meta">${players.length} online</div>
             </div>
-            <div style="padding: 4px 8px;">
-                ${playerRows || emptyState}
-            </div>
+            ${playerRows || emptyState}
         </div>
 
-        <div class="footer">>> AUTO_REFRESH :: 5_SEC</div>
+        <div class="footer">Auto-refresh every 5 seconds</div>
+
     </div>
 </body>
 </html>`);
