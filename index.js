@@ -8,7 +8,6 @@ app.use(express.json());
 const onlinePlayers = new Map();
 const TIMEOUT_MS = 15000;
 
-// ---------- Статистика ----------
 const STATS_FILE = path.join(__dirname, 'stats.json');
 const SAMPLE_INTERVAL_MS = 60_000;
 
@@ -25,15 +24,12 @@ try {
         stats = { ...stats, ...loaded };
     }
 } catch (e) {
-    console.error('Не удалось загрузить stats.json:', e.message);
+    console.error('stats.json:', e.message);
 }
 
 function saveStats() {
-    try {
-        fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2));
-    } catch (e) {
-        console.error('Не удалось сохранить stats.json:', e.message);
-    }
+    try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2)); }
+    catch (e) { console.error('save:', e.message); }
 }
 
 function cleanupOffline() {
@@ -66,25 +62,15 @@ function getStats() {
     const dayCutoff = Date.now() - 24 * 60 * 60 * 1000;
     const recent = stats.samples.filter(s => s.t >= dayCutoff);
     const last24h = recent.length > 0
-        ? recent.reduce((sum, s) => sum + s.count, 0) / recent.length
-        : 0;
+        ? recent.reduce((sum, s) => sum + s.count, 0) / recent.length : 0;
     const peak24h = recent.length > 0
         ? recent.reduce((max, s) => s.count > max.count ? s : max, recent[0])
         : { count: 0, t: null };
 
-    const hourCutoff = Date.now() - 60 * 60 * 1000;
-    const lastHour = stats.samples.filter(s => s.t >= hourCutoff);
-    const hourAvg = lastHour.length > 0
-        ? lastHour.reduce((sum, s) => sum + s.count, 0) / lastHour.length
-        : 0;
-    const trend = onlinePlayers.size - Math.round(hourAvg);
-
     return {
         allTime: allTime.toFixed(1),
         last24h: last24h.toFixed(1),
-        peak24h,
-        trend,
-        recent
+        peak24h
     };
 }
 
@@ -99,100 +85,76 @@ app.post('/ping', (req, res) => {
 app.get('/online', (req, res) => {
     cleanupOffline();
     const players = Array.from(onlinePlayers.entries()).map(([uuid, data]) => ({
-        uuid, name: data.name
+        uuid, name: data.name, lastSeen: data.lastSeen
     }));
     res.json({ players, stats: { ...getStats(), record: stats.record } });
 });
 
-function initials(name) {
-    return name.slice(0, 2).toUpperCase();
+const PILL_PALETTES = [
+    { bg: 'rgba(74,222,128,0.9)', text: '#052e16' },
+    { bg: 'rgba(167,139,250,0.9)', text: '#1e1033' },
+    { bg: 'rgba(244,114,182,0.9)', text: '#4a0826' },
+    { bg: 'rgba(34,211,238,0.9)', text: '#083344' },
+    { bg: 'rgba(251,146,60,0.9)', text: '#431407' },
+    { bg: 'rgba(250,204,21,0.9)', text: '#422006' },
+];
+
+function pillForName(name) {
+    let hash = 0;
+    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    return PILL_PALETTES[Math.abs(hash) % PILL_PALETTES.length];
 }
 
-function formatDate(ts) {
-    if (!ts) return '—';
-    return new Date(ts).toLocaleString('en-US', {
-        timeZone: 'Asia/Almaty',
-        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
-    });
-}
-
-function formatTime(ts) {
-    if (!ts) return '';
-    return new Date(ts).toLocaleString('en-US', {
-        timeZone: 'Asia/Almaty',
-        hour: '2-digit', minute: '2-digit', hour12: false
-    });
-}
-
-function trendText(trend) {
-    if (trend > 0) return `+${trend} in the last hour`;
-    if (trend < 0) return `${trend} in the last hour`;
-    return 'Steady activity';
+function timeAgo(ts) {
+    const sec = Math.floor((Date.now() - ts) / 1000);
+    if (sec < 30) return 'online';
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+    return `${Math.floor(sec / 3600)}h`;
 }
 
 function buildSparkline(samples) {
-    if (samples.length < 2) {
-        return `<div style="color:rgba(255,255,255,0.2);font-size:12px;text-align:center;padding:30px 0;font-weight:300;letter-spacing:0.05em;">
-                    Collecting data
-                </div>`;
-    }
-
-    const W = 600, H = 100;
+    if (samples.length < 2) return '';
+    const W = 320, H = 60;
     const max = Math.max(...samples.map(s => s.count), 1);
-
     const points = samples.map((s, i) => {
         const x = (i / (samples.length - 1)) * W;
-        const y = H - 15 - (s.count / max) * (H - 30);
-        return [x, y];
+        const y = H - 8 - (s.count / max) * (H - 16);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
     });
-
-    const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-
-    const peakIdx = samples.reduce((maxI, s, i) => s.count > samples[maxI].count ? i : maxI, 0);
-    const peakPt = points[peakIdx];
-
     return `
-        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;">
-            <path d="${linePath}" stroke="rgba(255,255,255,0.5)" stroke-width="1" fill="none" stroke-linejoin="round"/>
-            <circle cx="${peakPt[0].toFixed(1)}" cy="${peakPt[1].toFixed(1)}" r="6" fill="none" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
-            <circle cx="${peakPt[0].toFixed(1)}" cy="${peakPt[1].toFixed(1)}" r="3" fill="#fff"/>
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;opacity:0.7;">
+            <polyline points="${points.join(' ')}" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
         </svg>
     `;
 }
 
 app.get('/', (req, res) => {
     cleanupOffline();
-    const players = Array.from(onlinePlayers.values());
+    const players = Array.from(onlinePlayers.entries()).map(([uuid, data]) => ({
+        uuid, name: data.name, lastSeen: data.lastSeen
+    }));
     const s = getStats();
 
-    const playerRows = players.map((p, i) => {
-        const isLast = i === players.length - 1;
+    const playerPills = players.map(p => {
+        const pill = pillForName(p.name);
+        const status = timeAgo(p.lastSeen);
         return `
-            <div class="player-row" style="${isLast ? '' : 'border-bottom: 1px solid rgba(255,255,255,0.05);'}">
-                <div class="player-info">
-                    <div class="player-avatar">${initials(p.name)}</div>
-                    <div>
-                        <div class="player-name">${p.name}</div>
-                        <div class="player-uuid">${p.uuid.slice(0, 8)}...</div>
-                    </div>
-                </div>
-                <div class="player-status"></div>
+            <div class="player-pill">
+                <span class="player-name">${p.name}</span>
+                <div class="player-status" style="background:${pill.bg};color:${pill.text};">${status}</div>
             </div>
         `;
     }).join('');
 
     const emptyState = `
-        <div style="text-align:center;padding:40px 0;color:rgba(255,255,255,0.3);font-size:13px;font-weight:300;">
-            No players online
+        <div style="color:rgba(255,255,255,0.4);font-size:14px;padding:12px 0;">
+            Никого нет онлайн
         </div>
     `;
 
-    const peakLabel = s.peak24h.count > 0
-        ? `Peak ${s.peak24h.count} at ${formatTime(s.peak24h.t)}`
-        : 'Awaiting first peak';
-
     res.send(`<!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -200,10 +162,10 @@ app.get('/', (req, res) => {
     <meta http-equiv="refresh" content="5">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #000; }
+        html, body { background: #0a0612; }
         body {
             color: #fff;
             font-family: 'Inter', -apple-system, sans-serif;
@@ -213,19 +175,48 @@ app.get('/', (req, res) => {
             overflow-x: hidden;
         }
 
-        .ambient {
+        .liquid-bg {
             position: fixed;
             inset: 0;
-            pointer-events: none;
             z-index: 0;
+            pointer-events: none;
         }
 
+        .liquid-bg svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        @keyframes blob1 {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(30px, -40px) scale(1.1); }
+            66% { transform: translate(-20px, 20px) scale(0.95); }
+        }
+        @keyframes blob2 {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            33% { transform: translate(-40px, 30px) scale(1.05); }
+            66% { transform: translate(20px, -30px) scale(1.1); }
+        }
+        @keyframes blob3 {
+            0%, 100% { transform: translate(0, 0) scale(1); }
+            50% { transform: translate(40px, 40px) scale(1.15); }
+        }
+
+        .blob-1 { animation: blob1 20s ease-in-out infinite; transform-origin: center; }
+        .blob-2 { animation: blob2 25s ease-in-out infinite; transform-origin: center; }
+        .blob-3 { animation: blob3 18s ease-in-out infinite; transform-origin: center; }
+
         .container {
-            max-width: 720px;
+            max-width: 1200px;
             margin: 0 auto;
-            padding: 40px 32px 60px;
+            padding: 32px 40px 60px;
             position: relative;
             z-index: 1;
+            min-height: 100vh;
+        }
+
+        @media (max-width: 700px) {
+            .container { padding: 24px 20px 40px; }
         }
 
         .header {
@@ -239,209 +230,239 @@ app.get('/', (req, res) => {
             align-items: center;
             gap: 10px;
         }
-        .logo-icon { display: flex; align-items: center; justify-content: center; }
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
         .logo-name {
             color: #fff;
-            font-size: 14px;
-            font-weight: 400;
-            letter-spacing: 0.02em;
+            font-size: 16px;
+            font-weight: 500;
         }
+
         .live-badge {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 6px 14px;
-            background: rgba(255,255,255,0.04);
-            border: 1px solid rgba(255,255,255,0.08);
+            padding: 8px 16px;
+            background: rgba(255,255,255,0.08);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.12);
             border-radius: 100px;
         }
         .live-dot {
             width: 6px; height: 6px;
             border-radius: 50%;
             background: #4ade80;
-            animation: livePulse 2s ease-in-out infinite;
+            box-shadow: 0 0 8px rgba(74,222,128,0.6);
+            animation: pulse 2s ease-in-out infinite;
         }
-        @keyframes livePulse {
+        @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
-        .live-text {
-            color: rgba(255,255,255,0.7);
-            font-size: 12px;
-            font-weight: 400;
-        }
+        .live-text { font-size: 13px; font-weight: 500; }
 
         .hero {
-            text-align: center;
-            margin: 80px 0 100px;
+            margin-bottom: 60px;
+            max-width: 720px;
         }
-        .hero-label {
-            color: rgba(255,255,255,0.4);
-            font-size: 13px;
-            letter-spacing: 0.15em;
-            text-transform: uppercase;
-            margin-bottom: 24px;
-            font-weight: 300;
-        }
-        .hero-value {
+        .hero-title {
+            font-size: clamp(48px, 8vw, 88px);
+            font-weight: 600;
+            line-height: 1.02;
+            letter-spacing: -0.035em;
             color: #fff;
-            font-size: 120px;
-            font-weight: 200;
-            line-height: 1;
-            letter-spacing: -0.04em;
         }
-        @media (max-width: 600px) {
-            .hero-value { font-size: 88px; }
+        .count-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            padding: 6px 24px 6px 20px;
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.18);
+            border-radius: 100px;
+            vertical-align: middle;
+            margin: 0 4px;
         }
-        .hero-sub {
-            color: rgba(255,255,255,0.4);
-            font-size: 14px;
-            margin-top: 24px;
-            font-weight: 300;
+        .count-spark {
+            width: 16px; height: 16px;
+            color: #facc15;
         }
 
         .stats-row {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1px;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.06);
-            border-radius: 8px;
-            overflow: hidden;
-            margin-bottom: 56px;
+            display: flex;
+            gap: 40px;
+            margin-bottom: 80px;
+            flex-wrap: wrap;
         }
-        @media (max-width: 600px) {
-            .stats-row { grid-template-columns: 1fr; }
-        }
-        .stat-cell {
-            background: #000;
-            padding: 28px 24px;
-        }
-        .stat-label {
-            color: rgba(255,255,255,0.4);
-            font-size: 11px;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            margin-bottom: 14px;
-            font-weight: 300;
+        .stat-block {
+            min-width: 90px;
         }
         .stat-value {
             color: #fff;
-            font-size: 36px;
-            font-weight: 200;
+            font-size: 44px;
+            font-weight: 600;
             line-height: 1;
             letter-spacing: -0.02em;
         }
+        .stat-label {
+            color: rgba(255,255,255,0.5);
+            font-size: 13px;
+            margin-top: 6px;
+            font-weight: 400;
+        }
         .stat-sub {
-            color: rgba(255,255,255,0.3);
+            color: rgba(255,255,255,0.35);
             font-size: 11px;
-            margin-top: 10px;
-            font-weight: 300;
+            margin-top: 2px;
         }
 
-        .chart-section {
-            margin-bottom: 48px;
+        .bottom-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+            align-items: end;
         }
-        .section-head {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 24px;
-        }
-        .section-label {
-            color: rgba(255,255,255,0.6);
-            font-size: 12px;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            font-weight: 300;
-        }
-        .section-meta {
-            color: rgba(255,255,255,0.3);
-            font-size: 11px;
-            font-weight: 300;
+        @media (max-width: 700px) {
+            .bottom-row { grid-template-columns: 1fr; }
         }
 
         .players-section {
-            border-top: 1px solid rgba(255,255,255,0.08);
-            padding-top: 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            align-items: flex-start;
         }
-        .player-row {
+        .section-label {
+            color: rgba(255,255,255,0.5);
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+
+        .player-pill {
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            padding: 16px 0;
-            transition: padding-left 0.2s;
+            gap: 8px;
+            padding: 6px 6px 6px 16px;
+            background: rgba(20,15,30,0.5);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 100px;
+            transition: transform 0.2s, background 0.2s;
+            max-width: 100%;
         }
-        .player-row:hover { padding-left: 8px; }
-        .player-info {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        }
-        .player-avatar {
-            width: 32px; height: 32px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.06);
-            border: 1px solid rgba(255,255,255,0.1);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: rgba(255,255,255,0.7);
-            font-size: 11px;
-            font-weight: 400;
+        .player-pill:hover {
+            transform: translateX(4px);
+            background: rgba(30,20,45,0.6);
         }
         .player-name {
             color: #fff;
             font-size: 14px;
-            font-weight: 400;
-        }
-        .player-uuid {
-            color: rgba(255,255,255,0.3);
-            font-size: 11px;
-            font-family: 'SF Mono', Menlo, monospace;
-            margin-top: 2px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
         }
         .player-status {
-            width: 5px; height: 5px;
-            border-radius: 50%;
-            background: #4ade80;
+            padding: 4px 12px;
+            border-radius: 100px;
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .chart-section {
+            background: rgba(20,15,30,0.4);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 16px;
+            padding: 18px 20px;
+        }
+        .chart-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 12px;
+        }
+        .chart-title {
+            color: rgba(255,255,255,0.7);
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .chart-meta {
+            color: rgba(255,255,255,0.4);
+            font-size: 11px;
         }
 
         .footer {
-            text-align: center;
-            color: rgba(255,255,255,0.2);
+            text-align: left;
+            color: rgba(255,255,255,0.25);
             font-size: 11px;
-            margin-top: 48px;
-            font-weight: 300;
-            letter-spacing: 0.05em;
+            margin-top: 60px;
         }
     </style>
 </head>
 <body>
 
-    <svg class="ambient" viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid slice">
-        <defs>
-            <radialGradient id="ambientGlow" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stop-color="#ffffff" stop-opacity="0.08"/>
-                <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
-            </radialGradient>
-        </defs>
-        <ellipse cx="1100" cy="200" rx="500" ry="350" fill="url(#ambientGlow)"/>
-        <path d="M -100,300 Q 700,80 1500,400" stroke="rgba(255,255,255,0.08)" stroke-width="0.5" fill="none"/>
-        <path d="M -100,400 Q 700,180 1500,500" stroke="rgba(255,255,255,0.06)" stroke-width="0.5" fill="none"/>
-        <path d="M -100,500 Q 700,280 1500,600" stroke="rgba(255,255,255,0.04)" stroke-width="0.5" fill="none"/>
-        <path d="M -100,250 Q 700,30 1500,350" stroke="rgba(255,255,255,0.03)" stroke-width="0.5" fill="none"/>
-    </svg>
+    <div class="liquid-bg">
+        <svg viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid slice">
+            <defs>
+                <radialGradient id="liquid1" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.95"/>
+                    <stop offset="40%" stop-color="#7c3aed" stop-opacity="0.7"/>
+                    <stop offset="100%" stop-color="#0a0612" stop-opacity="0"/>
+                </radialGradient>
+                <radialGradient id="liquid2" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stop-color="#c4b5fd" stop-opacity="0.6"/>
+                    <stop offset="100%" stop-color="#0a0612" stop-opacity="0"/>
+                </radialGradient>
+                <radialGradient id="liquid3" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stop-color="#1e1033" stop-opacity="0.95"/>
+                    <stop offset="100%" stop-color="#0a0612" stop-opacity="0"/>
+                </radialGradient>
+                <radialGradient id="liquidHighlight" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stop-color="#ffffff" stop-opacity="0.3"/>
+                    <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+                </radialGradient>
+                <filter id="liquidBlur">
+                    <feGaussianBlur stdDeviation="40"/>
+                </filter>
+            </defs>
+            <g filter="url(#liquidBlur)">
+                <ellipse class="blob-1" cx="950" cy="350" rx="500" ry="380" fill="url(#liquid1)"/>
+                <ellipse class="blob-2" cx="1100" cy="700" rx="400" ry="450" fill="url(#liquid1)" opacity="0.7"/>
+                <ellipse class="blob-3" cx="700" cy="800" rx="350" ry="280" fill="url(#liquid2)"/>
+                <ellipse class="blob-1" cx="400" cy="500" rx="300" ry="240" fill="url(#liquid3)"/>
+                <ellipse class="blob-2" cx="1000" cy="500" rx="180" ry="140" fill="url(#liquidHighlight)"/>
+                <ellipse class="blob-3" cx="800" cy="200" rx="120" ry="90" fill="url(#liquidHighlight)" opacity="0.6"/>
+            </g>
+        </svg>
+    </div>
 
     <div class="container">
 
         <div class="header">
             <div class="logo">
-                <div class="logo-icon">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                        <path d="M12 2 L14 9 L21 9 L15.5 13.5 L17.5 21 L12 16.5 L6.5 21 L8.5 13.5 L3 9 L10 9 Z" stroke="#fff" stroke-width="1" fill="none"/>
-                    </svg>
-                </div>
+                <div class="logo-icon">❄</div>
                 <span class="logo-name">Rocksnow</span>
             </div>
             <div class="live-badge">
@@ -451,46 +472,51 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="hero">
-            <div class="hero-label">Players online</div>
-            <div class="hero-value">${players.length}</div>
-            <div class="hero-sub">${trendText(s.trend)}</div>
+            <h1 class="hero-title">
+                Сейчас в игре<br>
+                <span class="count-pill">
+                    <svg class="count-spark" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M13 2 L4 14 L11 14 L11 22 L20 10 L13 10 Z"/>
+                    </svg>
+                    ${players.length}
+                </span>
+                <span style="opacity: 0.85;">${players.length === 1 ? 'игрок' : (players.length >= 2 && players.length <= 4) ? 'игрока' : 'игроков'}</span>
+            </h1>
         </div>
 
         <div class="stats-row">
-            <div class="stat-cell">
-                <div class="stat-label">Record</div>
+            <div class="stat-block">
                 <div class="stat-value">${stats.record.count}</div>
-                <div class="stat-sub">${formatDate(stats.record.timestamp)}</div>
+                <div class="stat-label">Рекорд</div>
             </div>
-            <div class="stat-cell">
-                <div class="stat-label">24h average</div>
+            <div class="stat-block">
                 <div class="stat-value">${s.last24h}</div>
-                <div class="stat-sub">Last 24 hours</div>
+                <div class="stat-label">Среднее 24ч</div>
             </div>
-            <div class="stat-cell">
-                <div class="stat-label">All time</div>
+            <div class="stat-block">
                 <div class="stat-value">${s.allTime}</div>
-                <div class="stat-sub">${stats.totalSamples.toLocaleString('en-US')} samples</div>
+                <div class="stat-label">Всё время</div>
             </div>
         </div>
 
-        <div class="chart-section">
-            <div class="section-head">
-                <div class="section-label">Activity / 24h</div>
-                <div class="section-meta">${peakLabel}</div>
+        <div class="bottom-row">
+            <div class="players-section">
+                <div class="section-label">Игроки онлайн</div>
+                ${playerPills || emptyState}
             </div>
-            ${buildSparkline(s.recent)}
+
+            ${s.peak24h.count > 0 ? `
+            <div class="chart-section">
+                <div class="chart-head">
+                    <span class="chart-title">Активность 24ч</span>
+                    <span class="chart-meta">пик ${s.peak24h.count}</span>
+                </div>
+                ${buildSparkline(stats.samples.filter(x => x.t >= Date.now() - 24*60*60*1000))}
+            </div>
+            ` : ''}
         </div>
 
-        <div class="players-section">
-            <div class="section-head">
-                <div class="section-label">Players</div>
-                <div class="section-meta">${players.length} online</div>
-            </div>
-            ${playerRows || emptyState}
-        </div>
-
-        <div class="footer">Auto-refresh every 5 seconds</div>
+        <div class="footer">Обновляется каждые 5 секунд</div>
 
     </div>
 </body>
