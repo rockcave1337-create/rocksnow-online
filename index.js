@@ -7,29 +7,49 @@ app.use(express.json());
 
 const onlinePlayers = new Map();
 const TIMEOUT_MS = 15000;
+const PLAYTIME_GAP_MS = 30_000;
 
 const STATS_FILE = path.join(__dirname, 'stats.json');
+const PLAYTIME_FILE = path.join(__dirname, 'playtime.json');
 const SAMPLE_INTERVAL_MS = 60_000;
 
 let stats = {
-    record: { count: 0, timestamp: null, name: null },
+    record: { count: 0, timestamp: null },
     samples: [],
     totalSamples: 0,
     sumSamples: 0
 };
 
+let playtime = {};
+
 try {
     if (fs.existsSync(STATS_FILE)) {
-        const loaded = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
-        stats = { ...stats, ...loaded };
+        stats = { ...stats, ...JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')) };
+    }
+    if (fs.existsSync(PLAYTIME_FILE)) {
+        playtime = JSON.parse(fs.readFileSync(PLAYTIME_FILE, 'utf8'));
     }
 } catch (e) {
-    console.error('stats.json:', e.message);
+    console.error('load:', e.message);
 }
 
 function saveStats() {
     try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2)); }
-    catch (e) { console.error('save:', e.message); }
+    catch (e) { console.error('save stats:', e.message); }
+}
+
+function savePlaytime() {
+    try { fs.writeFileSync(PLAYTIME_FILE, JSON.stringify(playtime, null, 2)); }
+    catch (e) { console.error('save playtime:', e.message); }
+}
+
+let saveTimer = null;
+function schedulePlaytimeSave() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => {
+        savePlaytime();
+        saveTimer = null;
+    }, 5000);
 }
 
 function cleanupOffline() {
@@ -44,6 +64,27 @@ function updateRecord(count) {
         stats.record = { count, timestamp: Date.now() };
         saveStats();
     }
+}
+
+function trackPlaytime(uuid, name) {
+    const now = Date.now();
+    const existing = playtime[uuid];
+    if (existing) {
+        const gap = now - existing.lastPing;
+        if (gap < PLAYTIME_GAP_MS) {
+            existing.totalMs += gap;
+        }
+        existing.lastPing = now;
+        existing.name = name;
+    } else {
+        playtime[uuid] = {
+            name,
+            totalMs: 0,
+            lastPing: now,
+            firstSeen: now
+        };
+    }
+    schedulePlaytimeSave();
 }
 
 setInterval(() => {
@@ -66,26 +107,31 @@ function getStats() {
     const peak24h = recent.length > 0
         ? recent.reduce((max, s) => s.count > max.count ? s : max, recent[0])
         : { count: 0, t: null };
-
     const hourCutoff = Date.now() - 60 * 60 * 1000;
     const lastHour = stats.samples.filter(s => s.t >= hourCutoff);
     const hourAvg = lastHour.length > 0
         ? lastHour.reduce((sum, s) => sum + s.count, 0) / lastHour.length : 0;
     const trend = onlinePlayers.size - Math.round(hourAvg);
-
     return {
         allTime: allTime.toFixed(1),
         last24h: last24h.toFixed(1),
-        peak24h,
-        trend,
-        recent
+        peak24h, trend, recent
     };
+}
+
+function getTopPlayers(limit = 3) {
+    return Object.entries(playtime)
+        .map(([uuid, data]) => ({ uuid, ...data }))
+        .filter(p => p.totalMs > 0)
+        .sort((a, b) => b.totalMs - a.totalMs)
+        .slice(0, limit);
 }
 
 app.post('/ping', (req, res) => {
     const { uuid, name } = req.body;
     if (!uuid || !name) return res.status(400).json({ error: 'missing fields' });
     onlinePlayers.set(uuid, { name, lastSeen: Date.now() });
+    trackPlaytime(uuid, name);
     updateRecord(onlinePlayers.size);
     res.json({ ok: true });
 });
@@ -95,18 +141,22 @@ app.get('/online', (req, res) => {
     const players = Array.from(onlinePlayers.entries()).map(([uuid, data]) => ({
         uuid, name: data.name, lastSeen: data.lastSeen
     }));
-    res.json({ players, stats: { ...getStats(), record: stats.record } });
+    res.json({
+        players,
+        stats: { ...getStats(), record: stats.record },
+        top: getTopPlayers(3)
+    });
 });
 
 const AVATAR_PALETTES = [
-    { bg: 'rgba(167,139,250,0.18)', border: 'rgba(167,139,250,0.3)', fg: '#c4b5fd' },
-    { bg: 'rgba(244,114,182,0.18)', border: 'rgba(244,114,182,0.3)', fg: '#f9a8d4' },
-    { bg: 'rgba(74,222,128,0.18)', border: 'rgba(74,222,128,0.3)', fg: '#86efac' },
-    { bg: 'rgba(96,165,250,0.18)', border: 'rgba(96,165,250,0.3)', fg: '#93c5fd' },
-    { bg: 'rgba(251,146,60,0.18)', border: 'rgba(251,146,60,0.3)', fg: '#fdba74' },
-    { bg: 'rgba(34,211,238,0.18)', border: 'rgba(34,211,238,0.3)', fg: '#67e8f9' },
-    { bg: 'rgba(250,204,21,0.18)', border: 'rgba(250,204,21,0.3)', fg: '#fde047' },
-    { bg: 'rgba(248,113,113,0.18)', border: 'rgba(248,113,113,0.3)', fg: '#fca5a5' },
+    { bg: 'rgba(167,139,250,0.18)', border: 'rgba(167,139,250,0.35)', fg: '#c4b5fd' },
+    { bg: 'rgba(244,114,182,0.18)', border: 'rgba(244,114,182,0.35)', fg: '#f9a8d4' },
+    { bg: 'rgba(74,222,128,0.18)', border: 'rgba(74,222,128,0.35)', fg: '#86efac' },
+    { bg: 'rgba(96,165,250,0.18)', border: 'rgba(96,165,250,0.35)', fg: '#93c5fd' },
+    { bg: 'rgba(251,146,60,0.18)', border: 'rgba(251,146,60,0.35)', fg: '#fdba74' },
+    { bg: 'rgba(34,211,238,0.18)', border: 'rgba(34,211,238,0.35)', fg: '#67e8f9' },
+    { bg: 'rgba(250,204,21,0.18)', border: 'rgba(250,204,21,0.35)', fg: '#fde047' },
+    { bg: 'rgba(248,113,113,0.18)', border: 'rgba(248,113,113,0.35)', fg: '#fca5a5' },
 ];
 
 function avatarColor(name) {
@@ -117,6 +167,14 @@ function avatarColor(name) {
 
 function initials(name) {
     return name.slice(0, 2).toUpperCase();
+}
+
+function formatPlaytime(ms) {
+    const totalMin = Math.floor(ms / 60000);
+    const hours = Math.floor(totalMin / 60);
+    const mins = totalMin % 60;
+    if (hours === 0) return `${mins}м`;
+    return `${hours}ч ${String(mins).padStart(2, '0')}м`;
 }
 
 function formatDate(ts) {
@@ -131,8 +189,7 @@ function formatDate(ts) {
 function formatTime(ts) {
     if (!ts) return '';
     return new Date(ts).toLocaleString('ru-RU', {
-        timeZone: 'Asia/Almaty',
-        hour: '2-digit', minute: '2-digit'
+        timeZone: 'Asia/Almaty', hour: '2-digit', minute: '2-digit'
     });
 }
 
@@ -148,26 +205,19 @@ function timeAgo(ts) {
 
 function buildSparkline(samples) {
     if (samples.length < 2) {
-        return `<div style="color:rgba(255,255,255,0.3);font-size:11px;text-align:center;padding:14px 0;">
-                    Накапливаем данные
-                </div>`;
+        return `<div style="color:rgba(255,255,255,0.3);font-size:11px;text-align:center;padding:14px 0;">Накапливаем данные</div>`;
     }
-
     const W = 400, H = 60;
     const max = Math.max(...samples.map(s => s.count), 1);
-
     const points = samples.map((s, i) => {
         const x = (i / (samples.length - 1)) * W;
         const y = H - 6 - (s.count / max) * (H - 14);
         return [x, y];
     });
-
     const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
     const areaPath = `${linePath} L ${W},${H} L 0,${H} Z`;
-
     const peakIdx = samples.reduce((maxI, s, i) => s.count > samples[maxI].count ? i : maxI, 0);
     const peakPt = points[peakIdx];
-
     return `
         <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:50px;display:block;">
             <defs>
@@ -184,6 +234,34 @@ function buildSparkline(samples) {
     `;
 }
 
+function buildPodiumCard(player, place) {
+    if (!player) {
+        const labels = { 1: 'Никого', 2: '—', 3: '—' };
+        return `
+            <div class="podium-card podium-empty podium-${place}">
+                <div class="podium-medal medal-${place}">${place}</div>
+                <div class="podium-avatar empty-avatar">?</div>
+                <div class="podium-divider"></div>
+                <div class="podium-name empty-name">${labels[place]}</div>
+                <div class="podium-time">—</div>
+            </div>
+        `;
+    }
+    const c = avatarColor(player.name);
+    const isFirst = place === 1;
+    return `
+        <div class="podium-card podium-${place}">
+            <div class="podium-medal medal-${place}">${place}</div>
+            <div class="podium-avatar" style="background:${c.bg};border-color:${c.border};color:${c.fg};">
+                ${initials(player.name)}
+            </div>
+            <div class="podium-divider ${isFirst ? 'gold' : ''}"></div>
+            <div class="podium-name">${player.name}</div>
+            <div class="podium-time ${isFirst ? 'gold-time' : ''}">${formatPlaytime(player.totalMs)}</div>
+        </div>
+    `;
+}
+
 app.get('/', (req, res) => {
     cleanupOffline();
     const players = Array.from(onlinePlayers.entries())
@@ -191,6 +269,7 @@ app.get('/', (req, res) => {
         .sort((a, b) => b.lastSeen - a.lastSeen);
 
     const s = getStats();
+    const top = getTopPlayers(3);
     const recordDate = formatDate(stats.record.timestamp);
 
     const trendBadge = s.trend > 0
@@ -204,9 +283,9 @@ app.get('/', (req, res) => {
         const isActive = (Date.now() - p.lastSeen) < 30000;
         const status = isActive
             ? `<div class="status-dot online" title="в сети"></div>`
-            : `<div class="status-time" title="${timeAgo(p.lastSeen)} назад">${timeAgo(p.lastSeen)}</div>`;
+            : `<div class="status-time">${timeAgo(p.lastSeen)}</div>`;
         return `
-            <div class="player-card" data-name="${p.name.toLowerCase()}">
+            <div class="player-card" data-name="${p.name.toLowerCase()}" data-uuid="${p.uuid}">
                 <div class="avatar" style="background:${c.bg};border-color:${c.border};color:${c.fg};">${initials(p.name)}</div>
                 <div class="player-info">
                     <div class="player-name">${p.name}</div>
@@ -217,19 +296,9 @@ app.get('/', (req, res) => {
         `;
     }).join('');
 
-    const emptyState = `
-        <div style="text-align:center;padding:40px 20px;color:rgba(255,255,255,0.4);font-size:14px;grid-column: 1 / -1;">
-            Сейчас никого нет онлайн
-        </div>
-    `;
-
-    const peakInfo = s.peak24h.count > 0
-        ? `пик ${s.peak24h.count}<br>в ${formatTime(s.peak24h.t)}`
-        : 'нет<br>данных';
-
-    const peakChartLabel = s.peak24h.count > 0
-        ? `пик ${s.peak24h.count} в ${formatTime(s.peak24h.t)}`
-        : '';
+    const emptyState = `<div style="text-align:center;padding:40px 20px;color:rgba(255,255,255,0.4);font-size:14px;grid-column: 1 / -1;">Сейчас никого нет онлайн</div>`;
+    const peakInfo = s.peak24h.count > 0 ? `пик ${s.peak24h.count}<br>в ${formatTime(s.peak24h.t)}` : 'нет<br>данных';
+    const peakChartLabel = s.peak24h.count > 0 ? `пик ${s.peak24h.count} в ${formatTime(s.peak24h.t)}` : '';
 
     res.send(`<!DOCTYPE html>
 <html lang="ru">
@@ -253,14 +322,8 @@ app.get('/', (req, res) => {
             overflow-x: hidden;
         }
 
-        .liquid-bg {
-            position: fixed;
-            inset: 0;
-            z-index: 0;
-            pointer-events: none;
-        }
+        .liquid-bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
         .liquid-bg svg { width: 100%; height: 100%; }
-
         @keyframes blob1 {
             0%, 100% { transform: translate(0, 0) scale(1); }
             33% { transform: translate(60px, -40px) scale(1.1); }
@@ -285,9 +348,7 @@ app.get('/', (req, res) => {
             position: relative;
             z-index: 1;
         }
-        @media (max-width: 700px) {
-            .container { padding: 20px 16px 32px; }
-        }
+        @media (max-width: 700px) { .container { padding: 20px 16px 32px; } }
 
         .header {
             display: flex;
@@ -303,22 +364,12 @@ app.get('/', (req, res) => {
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255,255,255,0.18);
             border-radius: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #fff;
-            font-size: 16px;
+            display: flex; align-items: center; justify-content: center;
+            color: #fff; font-size: 16px;
         }
-        .logo-name {
-            color: #fff;
-            font-size: 16px;
-            font-weight: 600;
-        }
-
+        .logo-name { color: #fff; font-size: 16px; font-weight: 600; }
         .live-badge {
-            display: flex;
-            align-items: center;
-            gap: 8px;
+            display: flex; align-items: center; gap: 8px;
             padding: 7px 14px;
             background: rgba(255,255,255,0.1);
             backdrop-filter: blur(20px);
@@ -327,21 +378,13 @@ app.get('/', (req, res) => {
             border-radius: 100px;
         }
         .live-dot {
-            width: 6px; height: 6px;
-            border-radius: 50%;
+            width: 6px; height: 6px; border-radius: 50%;
             background: #4ade80;
             box-shadow: 0 0 8px rgba(74,222,128,0.7);
             animation: livePulse 2s ease-in-out infinite;
         }
-        @keyframes livePulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        .live-text {
-            color: #fff;
-            font-size: 12px;
-            font-weight: 500;
-        }
+        @keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .live-text { color: #fff; font-size: 12px; font-weight: 500; }
 
         .top-grid {
             display: grid;
@@ -350,9 +393,7 @@ app.get('/', (req, res) => {
             margin-bottom: 16px;
             align-items: stretch;
         }
-        @media (max-width: 800px) {
-            .top-grid { grid-template-columns: 1fr; }
-        }
+        @media (max-width: 800px) { .top-grid { grid-template-columns: 1fr; } }
 
         .glass {
             background: rgba(255,255,255,0.05);
@@ -362,111 +403,172 @@ app.get('/', (req, res) => {
             border-radius: 18px;
         }
 
-        .hero-card {
-            padding: 24px 26px;
+        .hero-card { padding: 24px 26px; display: flex; flex-direction: column; justify-content: space-between; min-height: 280px; }
+        .hero-label { color: rgba(255,255,255,0.55); font-size: 11px; font-weight: 500; margin-bottom: 14px; text-transform: uppercase; letter-spacing: 0.08em; }
+        .hero-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+        .hero-value { color: #fff; font-size: 96px; font-weight: 700; line-height: 0.9; letter-spacing: -0.05em; }
+        @media (max-width: 600px) { .hero-value { font-size: 72px; } }
+        .trend-pill { display: flex; align-items: center; gap: 6px; padding: 6px 12px; backdrop-filter: blur(20px); border-radius: 100px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+        .trend-up { background: rgba(74,222,128,0.18); border: 1px solid rgba(74,222,128,0.35); color: #86efac; }
+        .trend-down { background: rgba(248,113,113,0.18); border: 1px solid rgba(248,113,113,0.35); color: #fca5a5; }
+        .trend-flat { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: rgba(255,255,255,0.7); }
+        .chart-block { margin-top: 20px; }
+        .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .chart-title { color: rgba(255,255,255,0.5); font-size: 11px; font-weight: 500; }
+        .chart-meta { color: rgba(255,255,255,0.4); font-size: 11px; }
+
+        .side-stats { display: grid; grid-template-rows: 1fr 1fr 1fr; gap: 10px; }
+        .stat-card { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; border-radius: 14px; }
+        .stat-label { color: rgba(255,255,255,0.5); font-size: 11px; font-weight: 500; margin-bottom: 2px; }
+        .stat-value { color: #fff; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+        .stat-meta { color: rgba(255,255,255,0.4); font-size: 10px; text-align: right; line-height: 1.3; }
+
+        .section-head {
             display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            min-height: 280px;
+            align-items: center;
+            gap: 10px;
+            margin: 28px 4px 16px;
         }
-        .hero-label {
-            color: rgba(255,255,255,0.55);
-            font-size: 11px;
-            font-weight: 500;
-            margin-bottom: 14px;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }
-        .hero-row {
-            display: flex;
-            align-items: baseline;
-            gap: 14px;
-            flex-wrap: wrap;
-        }
-        .hero-value {
+        .section-title {
             color: #fff;
-            font-size: 96px;
-            font-weight: 700;
-            line-height: 0.9;
-            letter-spacing: -0.05em;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .section-tag {
+            padding: 2px 8px;
+            background: rgba(250,204,21,0.15);
+            border: 1px solid rgba(250,204,21,0.3);
+            border-radius: 100px;
+            color: #fde047;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .podium {
+            display: grid;
+            grid-template-columns: 1fr 1.15fr 1fr;
+            gap: 14px;
+            align-items: end;
+            margin-bottom: 24px;
+            padding-top: 18px;
         }
         @media (max-width: 600px) {
-            .hero-value { font-size: 72px; }
+            .podium { grid-template-columns: 1fr; padding-top: 0; }
         }
-        .trend-pill {
+
+        .podium-card {
+            position: relative;
+            padding: 28px 16px 20px;
+            text-align: center;
+            border-radius: 18px;
+            transition: transform 0.25s ease, box-shadow 0.25s ease;
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            border: 1px solid rgba(255,255,255,0.1);
+            cursor: default;
+        }
+        .podium-card:hover {
+            transform: translateY(-6px) scale(1.03);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+        }
+        .podium-1 {
+            padding: 32px 16px 22px;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(250,204,21,0.3);
+            box-shadow: 0 0 30px rgba(250,204,21,0.08);
+        }
+        .podium-1:hover {
+            box-shadow: 0 12px 40px rgba(0,0,0,0.3), 0 0 40px rgba(250,204,21,0.15);
+        }
+
+        .podium-medal {
+            position: absolute;
+            top: -12px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
             display: flex;
             align-items: center;
-            gap: 6px;
-            padding: 6px 12px;
-            backdrop-filter: blur(20px);
-            border-radius: 100px;
-            font-size: 12px;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 700;
+            border: 2px solid #0a0612;
+        }
+        .medal-1 {
+            width: 32px; height: 32px;
+            top: -14px;
+            background: linear-gradient(135deg, #fde047, #ca8a04);
+            color: #422006;
+            font-size: 14px;
+            box-shadow: 0 0 12px rgba(250,204,21,0.4);
+        }
+        .medal-2 {
+            background: linear-gradient(135deg, #d1d5db, #9ca3af);
+            color: #1f2937;
+        }
+        .medal-3 {
+            background: linear-gradient(135deg, #fdba74, #c2410c);
+            color: #431407;
+        }
+
+        .podium-avatar {
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 1.5px solid;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0 auto 12px;
+        }
+        .podium-1 .podium-avatar {
+            width: 64px; height: 64px;
+            border-width: 2px;
+            font-size: 20px;
+            margin-bottom: 14px;
+        }
+        .empty-avatar {
+            background: rgba(255,255,255,0.05);
+            border-color: rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.3);
+        }
+
+        .podium-divider {
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+            margin: 0 auto 10px;
+        }
+        .podium-divider.gold {
+            background: linear-gradient(90deg, transparent, rgba(250,204,21,0.4), transparent);
+            margin-bottom: 12px;
+        }
+
+        .podium-name {
+            color: #fff;
+            font-size: 13px;
             font-weight: 600;
+            margin-bottom: 4px;
+            overflow: hidden;
+            text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .trend-up {
-            background: rgba(74,222,128,0.18);
-            border: 1px solid rgba(74,222,128,0.35);
-            color: #86efac;
-        }
-        .trend-down {
-            background: rgba(248,113,113,0.18);
-            border: 1px solid rgba(248,113,113,0.35);
-            color: #fca5a5;
-        }
-        .trend-flat {
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.15);
-            color: rgba(255,255,255,0.7);
-        }
+        .podium-1 .podium-name { font-size: 14px; }
+        .empty-name { color: rgba(255,255,255,0.4); font-weight: 500; }
 
-        .chart-block { margin-top: 20px; }
-        .chart-head {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-        }
-        .chart-title {
+        .podium-time {
             color: rgba(255,255,255,0.5);
             font-size: 11px;
-            font-weight: 500;
+            font-variant-numeric: tabular-nums;
         }
-        .chart-meta {
-            color: rgba(255,255,255,0.4);
-            font-size: 11px;
-        }
-
-        .side-stats {
-            display: grid;
-            grid-template-rows: 1fr 1fr 1fr;
-            gap: 10px;
-        }
-        .stat-card {
-            padding: 12px 16px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            border-radius: 14px;
-        }
-        .stat-label {
-            color: rgba(255,255,255,0.5);
-            font-size: 11px;
-            font-weight: 500;
-            margin-bottom: 2px;
-        }
-        .stat-value {
-            color: #fff;
-            font-size: 24px;
-            font-weight: 700;
-            letter-spacing: -0.02em;
-            line-height: 1.1;
-        }
-        .stat-meta {
-            color: rgba(255,255,255,0.4);
-            font-size: 10px;
-            text-align: right;
-            line-height: 1.3;
+        .gold-time {
+            color: #fde047;
+            font-size: 12px;
+            font-weight: 600;
         }
 
         .players-card { overflow: hidden; }
@@ -479,16 +581,8 @@ app.get('/', (req, res) => {
             border-bottom: 1px solid rgba(255,255,255,0.06);
             flex-wrap: wrap;
         }
-        .players-title-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .players-title {
-            color: #fff;
-            font-size: 14px;
-            font-weight: 600;
-        }
+        .players-title-row { display: flex; align-items: center; gap: 10px; }
+        .players-title { color: #fff; font-size: 14px; font-weight: 600; }
         .count-badge {
             padding: 2px 8px;
             background: rgba(74,222,128,0.15);
@@ -511,16 +605,9 @@ app.get('/', (req, res) => {
             transition: border-color 0.15s, background 0.15s;
         }
         .search-input::placeholder { color: rgba(255,255,255,0.4); }
-        .search-input:focus {
-            border-color: rgba(167,139,250,0.5);
-            background: rgba(255,255,255,0.08);
-        }
+        .search-input:focus { border-color: rgba(167,139,250,0.5); background: rgba(255,255,255,0.08); }
 
-        .players-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0;
-        }
+        .players-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
         @media (max-width: 600px) {
             .players-grid { grid-template-columns: 1fr; }
             .players-grid .player-card { border-right: none !important; }
@@ -567,27 +654,11 @@ app.get('/', (req, res) => {
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .status-dot {
-            width: 7px; height: 7px;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }
-        .status-dot.online {
-            background: #4ade80;
-            box-shadow: 0 0 6px rgba(74,222,128,0.6);
-        }
-        .status-time {
-            color: rgba(255,255,255,0.4);
-            font-size: 11px;
-            flex-shrink: 0;
-        }
+        .status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .status-dot.online { background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
+        .status-time { color: rgba(255,255,255,0.4); font-size: 11px; flex-shrink: 0; }
 
-        .footer {
-            text-align: center;
-            color: rgba(255,255,255,0.25);
-            font-size: 11px;
-            margin-top: 24px;
-        }
+        .footer { text-align: center; color: rgba(255,255,255,0.25); font-size: 11px; margin-top: 24px; }
     </style>
 </head>
 <body>
@@ -681,6 +752,17 @@ app.get('/', (req, res) => {
             </div>
         </div>
 
+        <div class="section-head">
+            <div class="section-title">Топ игроков</div>
+            <div class="section-tag">по времени</div>
+        </div>
+
+        <div class="podium">
+            ${buildPodiumCard(top[1], 2)}
+            ${buildPodiumCard(top[0], 1)}
+            ${buildPodiumCard(top[2], 3)}
+        </div>
+
         <div class="glass players-card">
             <div class="players-head">
                 <div class="players-title-row">
@@ -710,10 +792,9 @@ app.get('/', (req, res) => {
                 });
             });
         }
-
         document.querySelectorAll('.player-card').forEach(card => {
             card.addEventListener('click', () => {
-                const uuid = card.querySelector('.player-uuid')?.textContent.replace('...', '');
+                const uuid = card.dataset.uuid;
                 if (uuid && navigator.clipboard) {
                     navigator.clipboard.writeText(uuid).then(() => {
                         const orig = card.style.background;
