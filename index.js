@@ -67,10 +67,18 @@ function getStats() {
         ? recent.reduce((max, s) => s.count > max.count ? s : max, recent[0])
         : { count: 0, t: null };
 
+    const hourCutoff = Date.now() - 60 * 60 * 1000;
+    const lastHour = stats.samples.filter(s => s.t >= hourCutoff);
+    const hourAvg = lastHour.length > 0
+        ? lastHour.reduce((sum, s) => sum + s.count, 0) / lastHour.length : 0;
+    const trend = onlinePlayers.size - Math.round(hourAvg);
+
     return {
         allTime: allTime.toFixed(1),
         last24h: last24h.toFixed(1),
-        peak24h
+        peak24h,
+        trend,
+        recent
     };
 }
 
@@ -90,68 +98,139 @@ app.get('/online', (req, res) => {
     res.json({ players, stats: { ...getStats(), record: stats.record } });
 });
 
-const PILL_PALETTES = [
-    { bg: 'rgba(74,222,128,0.9)', text: '#052e16' },
-    { bg: 'rgba(167,139,250,0.9)', text: '#1e1033' },
-    { bg: 'rgba(244,114,182,0.9)', text: '#4a0826' },
-    { bg: 'rgba(34,211,238,0.9)', text: '#083344' },
-    { bg: 'rgba(251,146,60,0.9)', text: '#431407' },
-    { bg: 'rgba(250,204,21,0.9)', text: '#422006' },
+const AVATAR_PALETTES = [
+    { bg: '#ede9fe', fg: '#6d28d9' },
+    { bg: '#fce7f3', fg: '#be185d' },
+    { bg: '#dcfce7', fg: '#15803d' },
+    { bg: '#dbeafe', fg: '#1d4ed8' },
+    { bg: '#fed7aa', fg: '#c2410c' },
+    { bg: '#cffafe', fg: '#0e7490' },
+    { bg: '#fef3c7', fg: '#a16207' },
+    { bg: '#fee2e2', fg: '#b91c1c' },
 ];
 
-function pillForName(name) {
+function avatarColor(name) {
     let hash = 0;
     for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
-    return PILL_PALETTES[Math.abs(hash) % PILL_PALETTES.length];
+    return AVATAR_PALETTES[Math.abs(hash) % AVATAR_PALETTES.length];
+}
+
+function initials(name) {
+    return name.slice(0, 2).toUpperCase();
+}
+
+function formatDate(ts, withTime = true) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    const dateStr = d.toLocaleString('ru-RU', {
+        timeZone: 'Asia/Almaty',
+        day: 'numeric', month: 'short'
+    });
+    if (!withTime) return dateStr;
+    const timeStr = d.toLocaleString('ru-RU', {
+        timeZone: 'Asia/Almaty',
+        hour: '2-digit', minute: '2-digit'
+    });
+    return { date: dateStr, time: timeStr };
+}
+
+function formatTime(ts) {
+    if (!ts) return '';
+    return new Date(ts).toLocaleString('ru-RU', {
+        timeZone: 'Asia/Almaty',
+        hour: '2-digit', minute: '2-digit'
+    });
 }
 
 function timeAgo(ts) {
     const sec = Math.floor((Date.now() - ts) / 1000);
-    if (sec < 30) return 'online';
-    if (sec < 60) return `${sec}s`;
-    if (sec < 3600) return `${Math.floor(sec / 60)}m`;
-    return `${Math.floor(sec / 3600)}h`;
+    if (sec < 60) return 'только что';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min} мин назад`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr} ч назад`;
+    return formatDate(ts, false);
 }
 
 function buildSparkline(samples) {
-    if (samples.length < 2) return '';
-    const W = 320, H = 60;
+    if (samples.length < 2) {
+        return `<div style="color:#a8a29e;font-size:12px;text-align:center;padding:24px 0;">
+                    Накапливаем данные за сутки
+                </div>`;
+    }
+
+    const W = 400, H = 80;
     const max = Math.max(...samples.map(s => s.count), 1);
+
     const points = samples.map((s, i) => {
         const x = (i / (samples.length - 1)) * W;
         const y = H - 8 - (s.count / max) * (H - 16);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
+        return [x, y];
     });
+
+    const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+    const areaPath = `${linePath} L ${W},${H} L 0,${H} Z`;
+
+    const peakIdx = samples.reduce((maxI, s, i) => s.count > samples[maxI].count ? i : maxI, 0);
+    const peakPt = points[peakIdx];
+
     return `
-        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;opacity:0.7;">
-            <polyline points="${points.join(' ')}" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:60px;display:block;">
+            <defs>
+                <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#7c3aed" stop-opacity="0.15"/>
+                    <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
+                </linearGradient>
+            </defs>
+            <path d="${areaPath}" fill="url(#area)"/>
+            <path d="${linePath}" stroke="#7c3aed" stroke-width="2" fill="none" stroke-linejoin="round"/>
+            <circle cx="${peakPt[0].toFixed(1)}" cy="${peakPt[1].toFixed(1)}" r="3" fill="#7c3aed"/>
         </svg>
     `;
 }
 
 app.get('/', (req, res) => {
     cleanupOffline();
-    const players = Array.from(onlinePlayers.entries()).map(([uuid, data]) => ({
-        uuid, name: data.name, lastSeen: data.lastSeen
-    }));
-    const s = getStats();
+    const players = Array.from(onlinePlayers.entries())
+        .map(([uuid, data]) => ({ uuid, name: data.name, lastSeen: data.lastSeen }))
+        .sort((a, b) => b.lastSeen - a.lastSeen);
 
-    const playerPills = players.map(p => {
-        const pill = pillForName(p.name);
-        const status = timeAgo(p.lastSeen);
+    const s = getStats();
+    const recordDate = formatDate(stats.record.timestamp);
+
+    const trendBadge = s.trend > 0
+        ? `<div class="trend-badge trend-up">↑ +${s.trend} за час</div>`
+        : s.trend < 0
+            ? `<div class="trend-badge trend-down">↓ ${s.trend} за час</div>`
+            : `<div class="trend-badge trend-flat">— стабильно</div>`;
+
+    const playerRows = players.map((p, i) => {
+        const c = avatarColor(p.name);
+        const isActive = (Date.now() - p.lastSeen) < 30000;
+        const statusEl = isActive
+            ? `<div class="status-online"><div class="status-dot"></div>в сети</div>`
+            : `<div class="status-recent">${timeAgo(p.lastSeen)}</div>`;
         return `
-            <div class="player-pill">
-                <span class="player-name">${p.name}</span>
-                <div class="player-status" style="background:${pill.bg};color:${pill.text};">${status}</div>
+            <div class="player-row ${i === players.length - 1 ? 'last' : ''}">
+                <div class="avatar" style="background:${c.bg};color:${c.fg};">${initials(p.name)}</div>
+                <div class="player-info">
+                    <div class="player-name">${p.name}</div>
+                    <div class="player-uuid">${p.uuid}</div>
+                </div>
+                ${statusEl}
             </div>
         `;
     }).join('');
 
     const emptyState = `
-        <div style="color:rgba(255,255,255,0.4);font-size:14px;padding:12px 0;">
-            Никого нет онлайн
+        <div style="text-align:center;padding:48px 20px;color:#a8a29e;font-size:14px;">
+            Сейчас никого нет онлайн
         </div>
     `;
+
+    const peakInfo = s.peak24h.count > 0
+        ? `пик ${s.peak24h.count}<br>в ${formatTime(s.peak24h.t)}`
+        : 'нет<br>данных';
 
     res.send(`<!DOCTYPE html>
 <html lang="ru">
@@ -162,358 +241,316 @@ app.get('/', (req, res) => {
     <meta http-equiv="refresh" content="5">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #0a0612; }
+        html, body { background: #fafaf9; }
         body {
-            color: #fff;
+            color: #1c1917;
             font-family: 'Inter', -apple-system, sans-serif;
             min-height: 100vh;
             -webkit-font-smoothing: antialiased;
-            position: relative;
-            overflow-x: hidden;
+            padding: 32px 20px;
         }
-
-        .liquid-bg {
-            position: fixed;
-            inset: 0;
-            z-index: 0;
-            pointer-events: none;
-        }
-
-        .liquid-bg svg {
-            width: 100%;
-            height: 100%;
-        }
-
-        @keyframes blob1 {
-            0%, 100% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(30px, -40px) scale(1.1); }
-            66% { transform: translate(-20px, 20px) scale(0.95); }
-        }
-        @keyframes blob2 {
-            0%, 100% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(-40px, 30px) scale(1.05); }
-            66% { transform: translate(20px, -30px) scale(1.1); }
-        }
-        @keyframes blob3 {
-            0%, 100% { transform: translate(0, 0) scale(1); }
-            50% { transform: translate(40px, 40px) scale(1.15); }
-        }
-
-        .blob-1 { animation: blob1 20s ease-in-out infinite; transform-origin: center; }
-        .blob-2 { animation: blob2 25s ease-in-out infinite; transform-origin: center; }
-        .blob-3 { animation: blob3 18s ease-in-out infinite; transform-origin: center; }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 32px 40px 60px;
-            position: relative;
-            z-index: 1;
-            min-height: 100vh;
-        }
-
-        @media (max-width: 700px) {
-            .container { padding: 24px 20px 40px; }
-        }
+        .container { max-width: 920px; margin: 0 auto; }
 
         .header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 80px;
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e7e5e4;
         }
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
+        .logo { display: flex; align-items: center; gap: 12px; }
         .logo-icon {
-            width: 32px;
-            height: 32px;
-            background: rgba(255,255,255,0.1);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255,255,255,0.12);
+            width: 36px; height: 36px;
+            background: #7c3aed;
             border-radius: 10px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 16px;
+            color: #fff;
+            font-size: 18px;
         }
         .logo-name {
-            color: #fff;
+            color: #1c1917;
             font-size: 16px;
-            font-weight: 500;
+            font-weight: 600;
+            line-height: 1.2;
         }
-
+        .logo-sub {
+            color: #78716c;
+            font-size: 12px;
+            margin-top: 1px;
+        }
         .live-badge {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding: 8px 16px;
-            background: rgba(255,255,255,0.08);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255,255,255,0.12);
+            padding: 6px 14px;
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
             border-radius: 100px;
         }
         .live-dot {
             width: 6px; height: 6px;
             border-radius: 50%;
-            background: #4ade80;
-            box-shadow: 0 0 8px rgba(74,222,128,0.6);
-            animation: pulse 2s ease-in-out infinite;
+            background: #22c55e;
+            animation: livePulse 2s ease-in-out infinite;
         }
-        @keyframes pulse {
+        @keyframes livePulse {
             0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+            50% { opacity: 0.4; }
         }
-        .live-text { font-size: 13px; font-weight: 500; }
-
-        .hero {
-            margin-bottom: 60px;
-            max-width: 720px;
-        }
-        .hero-title {
-            font-size: clamp(48px, 8vw, 88px);
-            font-weight: 600;
-            line-height: 1.02;
-            letter-spacing: -0.035em;
-            color: #fff;
-        }
-        .count-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            padding: 6px 24px 6px 20px;
-            background: rgba(255,255,255,0.1);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255,255,255,0.18);
-            border-radius: 100px;
-            vertical-align: middle;
-            margin: 0 4px;
-        }
-        .count-spark {
-            width: 16px; height: 16px;
-            color: #facc15;
+        .live-text {
+            color: #15803d;
+            font-size: 12px;
+            font-weight: 500;
         }
 
-        .stats-row {
-            display: flex;
-            gap: 40px;
-            margin-bottom: 80px;
-            flex-wrap: wrap;
-        }
-        .stat-block {
-            min-width: 90px;
-        }
-        .stat-value {
-            color: #fff;
-            font-size: 44px;
-            font-weight: 600;
-            line-height: 1;
-            letter-spacing: -0.02em;
-        }
-        .stat-label {
-            color: rgba(255,255,255,0.5);
-            font-size: 13px;
-            margin-top: 6px;
-            font-weight: 400;
-        }
-        .stat-sub {
-            color: rgba(255,255,255,0.35);
-            font-size: 11px;
-            margin-top: 2px;
-        }
-
-        .bottom-row {
+        .top-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 40px;
-            align-items: end;
+            grid-template-columns: 1.3fr 1fr;
+            gap: 16px;
+            margin-bottom: 16px;
         }
         @media (max-width: 700px) {
-            .bottom-row { grid-template-columns: 1fr; }
+            .top-grid { grid-template-columns: 1fr; }
         }
 
-        .players-section {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            align-items: flex-start;
-        }
-        .section-label {
-            color: rgba(255,255,255,0.5);
-            font-size: 12px;
-            font-weight: 500;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            margin-bottom: 6px;
+        .card {
+            background: #fff;
+            border: 1px solid #e7e5e4;
+            border-radius: 12px;
         }
 
-        .player-pill {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 6px 6px 6px 16px;
-            background: rgba(20,15,30,0.5);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 100px;
-            transition: transform 0.2s, background 0.2s;
-            max-width: 100%;
-        }
-        .player-pill:hover {
-            transform: translateX(4px);
-            background: rgba(30,20,45,0.6);
-        }
-        .player-name {
-            color: #fff;
-            font-size: 14px;
+        .main-card { padding: 24px; }
+        .main-label {
+            color: #78716c;
+            font-size: 13px;
             font-weight: 500;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 200px;
+            margin-bottom: 10px;
         }
-        .player-status {
-            padding: 4px 12px;
-            border-radius: 100px;
-            font-size: 11px;
+        .main-value-row {
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+            margin-bottom: 18px;
+            flex-wrap: wrap;
+        }
+        .main-value {
+            color: #1c1917;
+            font-size: 56px;
             font-weight: 600;
-            white-space: nowrap;
+            line-height: 1;
+            letter-spacing: -0.03em;
         }
+        @media (max-width: 600px) {
+            .main-value { font-size: 44px; }
+        }
+        .trend-badge {
+            font-size: 13px;
+            font-weight: 500;
+            padding: 4px 10px;
+            border-radius: 6px;
+        }
+        .trend-up { color: #15803d; background: #f0fdf4; }
+        .trend-down { color: #b91c1c; background: #fef2f2; }
+        .trend-flat { color: #78716c; background: #f5f5f4; }
 
-        .chart-section {
-            background: rgba(20,15,30,0.4);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 16px;
-            padding: 18px 20px;
-        }
-        .chart-head {
+        .chart-axis {
             display: flex;
             justify-content: space-between;
-            align-items: baseline;
-            margin-bottom: 12px;
+            margin-top: 6px;
+            color: #a8a29e;
+            font-size: 11px;
         }
-        .chart-title {
-            color: rgba(255,255,255,0.7);
+
+        .side-stats {
+            display: grid;
+            grid-template-rows: 1fr 1fr 1fr;
+            gap: 12px;
+        }
+        .stat-card {
+            background: #fff;
+            border: 1px solid #e7e5e4;
+            border-radius: 12px;
+            padding: 14px 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .stat-label {
+            color: #78716c;
             font-size: 12px;
             font-weight: 500;
+            margin-bottom: 4px;
         }
-        .chart-meta {
-            color: rgba(255,255,255,0.4);
+        .stat-value {
+            color: #1c1917;
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            line-height: 1.1;
+        }
+        .stat-meta {
+            color: #a8a29e;
             font-size: 11px;
+            text-align: right;
+            line-height: 1.3;
+        }
+
+        .players-card {
+            overflow: hidden;
+        }
+        .players-header {
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #f5f5f4;
+        }
+        .players-title {
+            color: #1c1917;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .players-count {
+            color: #78716c;
+            font-size: 12px;
+        }
+
+        .player-row {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 12px 20px;
+            border-bottom: 1px solid #f5f5f4;
+            transition: background 0.15s;
+        }
+        .player-row:hover { background: #fafaf9; }
+        .player-row.last { border-bottom: none; }
+
+        .avatar {
+            width: 36px; height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .player-info { flex: 1; min-width: 0; }
+        .player-name {
+            color: #1c1917;
+            font-size: 14px;
+            font-weight: 500;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .player-uuid {
+            color: #a8a29e;
+            font-size: 11px;
+            font-family: 'SF Mono', Menlo, monospace;
+            margin-top: 2px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .status-online {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #15803d;
+            font-size: 12px;
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+        .status-dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: #22c55e;
+        }
+        .status-recent {
+            color: #78716c;
+            font-size: 12px;
+            flex-shrink: 0;
         }
 
         .footer {
-            text-align: left;
-            color: rgba(255,255,255,0.25);
+            text-align: center;
+            color: #a8a29e;
             font-size: 11px;
-            margin-top: 60px;
+            margin-top: 24px;
         }
     </style>
 </head>
 <body>
-
-    <div class="liquid-bg">
-        <svg viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid slice">
-            <defs>
-                <radialGradient id="liquid1" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stop-color="#a78bfa" stop-opacity="0.95"/>
-                    <stop offset="40%" stop-color="#7c3aed" stop-opacity="0.7"/>
-                    <stop offset="100%" stop-color="#0a0612" stop-opacity="0"/>
-                </radialGradient>
-                <radialGradient id="liquid2" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stop-color="#c4b5fd" stop-opacity="0.6"/>
-                    <stop offset="100%" stop-color="#0a0612" stop-opacity="0"/>
-                </radialGradient>
-                <radialGradient id="liquid3" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stop-color="#1e1033" stop-opacity="0.95"/>
-                    <stop offset="100%" stop-color="#0a0612" stop-opacity="0"/>
-                </radialGradient>
-                <radialGradient id="liquidHighlight" cx="50%" cy="50%" r="50%">
-                    <stop offset="0%" stop-color="#ffffff" stop-opacity="0.3"/>
-                    <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
-                </radialGradient>
-                <filter id="liquidBlur">
-                    <feGaussianBlur stdDeviation="40"/>
-                </filter>
-            </defs>
-            <g filter="url(#liquidBlur)">
-                <ellipse class="blob-1" cx="950" cy="350" rx="500" ry="380" fill="url(#liquid1)"/>
-                <ellipse class="blob-2" cx="1100" cy="700" rx="400" ry="450" fill="url(#liquid1)" opacity="0.7"/>
-                <ellipse class="blob-3" cx="700" cy="800" rx="350" ry="280" fill="url(#liquid2)"/>
-                <ellipse class="blob-1" cx="400" cy="500" rx="300" ry="240" fill="url(#liquid3)"/>
-                <ellipse class="blob-2" cx="1000" cy="500" rx="180" ry="140" fill="url(#liquidHighlight)"/>
-                <ellipse class="blob-3" cx="800" cy="200" rx="120" ry="90" fill="url(#liquidHighlight)" opacity="0.6"/>
-            </g>
-        </svg>
-    </div>
-
     <div class="container">
 
         <div class="header">
             <div class="logo">
                 <div class="logo-icon">❄</div>
-                <span class="logo-name">Rocksnow</span>
+                <div>
+                    <div class="logo-name">Rocksnow</div>
+                    <div class="logo-sub">Online dashboard</div>
+                </div>
             </div>
             <div class="live-badge">
                 <div class="live-dot"></div>
-                <span class="live-text">Live</span>
+                <span class="live-text">Обновляется автоматически</span>
             </div>
         </div>
 
-        <div class="hero">
-            <h1 class="hero-title">
-                Сейчас в игре<br>
-                <span class="count-pill">
-                    <svg class="count-spark" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M13 2 L4 14 L11 14 L11 22 L20 10 L13 10 Z"/>
-                    </svg>
-                    ${players.length}
-                </span>
-                <span style="opacity: 0.85;">${players.length === 1 ? 'игрок' : (players.length >= 2 && players.length <= 4) ? 'игрока' : 'игроков'}</span>
-            </h1>
-        </div>
-
-        <div class="stats-row">
-            <div class="stat-block">
-                <div class="stat-value">${stats.record.count}</div>
-                <div class="stat-label">Рекорд</div>
-            </div>
-            <div class="stat-block">
-                <div class="stat-value">${s.last24h}</div>
-                <div class="stat-label">Среднее 24ч</div>
-            </div>
-            <div class="stat-block">
-                <div class="stat-value">${s.allTime}</div>
-                <div class="stat-label">Всё время</div>
-            </div>
-        </div>
-
-        <div class="bottom-row">
-            <div class="players-section">
-                <div class="section-label">Игроки онлайн</div>
-                ${playerPills || emptyState}
-            </div>
-
-            ${s.peak24h.count > 0 ? `
-            <div class="chart-section">
-                <div class="chart-head">
-                    <span class="chart-title">Активность 24ч</span>
-                    <span class="chart-meta">пик ${s.peak24h.count}</span>
+        <div class="top-grid">
+            <div class="card main-card">
+                <div class="main-label">Сейчас онлайн</div>
+                <div class="main-value-row">
+                    <div class="main-value">${players.length}</div>
+                    ${trendBadge}
                 </div>
-                ${buildSparkline(stats.samples.filter(x => x.t >= Date.now() - 24*60*60*1000))}
+                ${buildSparkline(s.recent)}
+                <div class="chart-axis">
+                    <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>сейчас</span>
+                </div>
             </div>
-            ` : ''}
+
+            <div class="side-stats">
+                <div class="stat-card">
+                    <div>
+                        <div class="stat-label">Рекорд</div>
+                        <div class="stat-value">${stats.record.count}</div>
+                    </div>
+                    <div class="stat-meta">${typeof recordDate === 'object' ? recordDate.date + '<br>' + recordDate.time : recordDate}</div>
+                </div>
+                <div class="stat-card">
+                    <div>
+                        <div class="stat-label">Среднее за 24ч</div>
+                        <div class="stat-value">${s.last24h}</div>
+                    </div>
+                    <div class="stat-meta">${peakInfo}</div>
+                </div>
+                <div class="stat-card">
+                    <div>
+                        <div class="stat-label">Всё время</div>
+                        <div class="stat-value">${s.allTime}</div>
+                    </div>
+                    <div class="stat-meta">${stats.totalSamples.toLocaleString('ru-RU')}<br>замеров</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card players-card">
+            <div class="players-header">
+                <div class="players-title">Игроки онлайн</div>
+                <div class="players-count">${players.length} ${players.length === 1 ? 'активный' : 'активных'}</div>
+            </div>
+            ${playerRows || emptyState}
         </div>
 
         <div class="footer">Обновляется каждые 5 секунд</div>
