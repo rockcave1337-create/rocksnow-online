@@ -9,8 +9,18 @@ const onlinePlayers = new Map();
 const TIMEOUT_MS = 15000;
 const PLAYTIME_GAP_MS = 30_000;
 
-const STATS_FILE = path.join(__dirname, 'stats.json');
-const PLAYTIME_FILE = path.join(__dirname, 'playtime.json');
+// Папка с данными. На Railway укажите DATA_DIR=/data и подключите volume по этому пути.
+// Если переменная не задана — fallback на локальную папку рядом со скриптом (как раньше).
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+} catch (e) {
+    console.error('mkdir DATA_DIR:', e.message);
+}
+const STATS_FILE = path.join(DATA_DIR, 'stats.json');
+const PLAYTIME_FILE = path.join(DATA_DIR, 'playtime.json');
+console.log('DATA_DIR =', DATA_DIR);
+
 const SAMPLE_INTERVAL_MS = 60_000;
 
 let stats = {
@@ -22,24 +32,62 @@ let stats = {
 
 let playtime = {};
 
+function loadJson(file, fallback) {
+    if (!fs.existsSync(file)) return fallback;
+    try {
+        const raw = fs.readFileSync(file, 'utf8');
+        if (!raw.trim()) return fallback;
+        return JSON.parse(raw);
+    } catch (e) {
+        // Если файл побит — пробуем .bak
+        const bak = file + '.bak';
+        if (fs.existsSync(bak)) {
+            try {
+                console.warn('main JSON corrupted, falling back to .bak:', file);
+                return JSON.parse(fs.readFileSync(bak, 'utf8'));
+            } catch (e2) {
+                console.error('bak also corrupted:', file, e2.message);
+            }
+        }
+        console.error('load failed for', file, '-', e.message);
+        return fallback;
+    }
+}
+
 try {
-    if (fs.existsSync(STATS_FILE)) {
-        stats = { ...stats, ...JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')) };
-    }
-    if (fs.existsSync(PLAYTIME_FILE)) {
-        playtime = JSON.parse(fs.readFileSync(PLAYTIME_FILE, 'utf8'));
-    }
+    stats = { ...stats, ...loadJson(STATS_FILE, {}) };
+    playtime = loadJson(PLAYTIME_FILE, {});
+    console.log('loaded:', Object.keys(playtime).length, 'players,', stats.totalSamples, 'samples');
 } catch (e) {
     console.error('load:', e.message);
 }
 
+// Атомарная запись: пишем во временный файл, fsync, переименовываем поверх.
+// Без этого если процесс упадёт в момент записи — файл будет полупустой и при старте JSON.parse провалится.
+function atomicWrite(file, data) {
+    const tmp = file + '.tmp';
+    const bak = file + '.bak';
+    const fd = fs.openSync(tmp, 'w');
+    try {
+        fs.writeSync(fd, data);
+        fs.fsyncSync(fd);
+    } finally {
+        fs.closeSync(fd);
+    }
+    // Сохраняем предыдущую версию как .bak (на случай если новая запись окажется битой)
+    if (fs.existsSync(file)) {
+        try { fs.copyFileSync(file, bak); } catch (e) { /* не критично */ }
+    }
+    fs.renameSync(tmp, file);
+}
+
 function saveStats() {
-    try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2)); }
+    try { atomicWrite(STATS_FILE, JSON.stringify(stats, null, 2)); }
     catch (e) { console.error('save stats:', e.message); }
 }
 
 function savePlaytime() {
-    try { fs.writeFileSync(PLAYTIME_FILE, JSON.stringify(playtime, null, 2)); }
+    try { atomicWrite(PLAYTIME_FILE, JSON.stringify(playtime, null, 2)); }
     catch (e) { console.error('save playtime:', e.message); }
 }
 
@@ -1334,3 +1382,20 @@ app.get('/', (req, res) => {
 });
 
 app.listen(process.env.PORT || 3000, '0.0.0.0', () => console.log('Running'));
+
+// При остановке (SIGTERM от Railway, SIGINT от Ctrl+C) — успеваем сохранить актуальный playtime.
+// Без этого последние ~5 секунд активности теряются на каждом редеплое.
+function gracefulShutdown(signal) {
+    console.log(signal + ' received, flushing data...');
+    try {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+        savePlaytime();
+        saveStats();
+        console.log('flushed OK');
+    } catch (e) {
+        console.error('flush failed:', e.message);
+    }
+    process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
