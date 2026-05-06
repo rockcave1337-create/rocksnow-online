@@ -207,6 +207,29 @@ app.get('/online', (req, res) => {
     });
 });
 
+// Все игроки которые когда-либо пинговались. Онлайн-статус берём из onlinePlayers.
+// Сортировка: онлайн первыми, потом по последней активности.
+app.get('/players/all', (req, res) => {
+    cleanupOffline();
+    const all = Object.entries(playtime).map(([uuid, data]) => {
+        const online = onlinePlayers.get(uuid);
+        return {
+            uuid,
+            name: (online && online.name) || data.name,
+            server: online ? (online.server || null) : (data.lastServer || null),
+            lastSeen: online ? online.lastSeen : data.lastPing,
+            online: !!online,
+            totalMs: data.totalMs || 0,
+            firstSeen: data.firstSeen || null
+        };
+    });
+    all.sort((a, b) => {
+        if (a.online !== b.online) return a.online ? -1 : 1;
+        return (b.lastSeen || 0) - (a.lastSeen || 0);
+    });
+    res.json({ players: all, total: all.length });
+});
+
 app.get('/player/:uuid', (req, res) => {
     const uuid = req.params.uuid;
     const pt = playtime[uuid];
@@ -649,6 +672,34 @@ app.get('/', (req, res) => {
         .gold-time { color: #fde047; font-size: 12px; font-weight: 600; }
 
         .players-card { overflow: hidden; }
+        .mode-tabs {
+            display: inline-flex;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 100px;
+            padding: 3px;
+            gap: 2px;
+        }
+        .mode-tab {
+            padding: 5px 12px;
+            background: transparent;
+            border: none;
+            border-radius: 100px;
+            color: rgba(255,255,255,0.55);
+            font-size: 12px;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background 0.18s, color 0.18s;
+            white-space: nowrap;
+        }
+        .mode-tab:hover { color: rgba(255,255,255,0.8); }
+        .mode-tab.active {
+            background: rgba(255,255,255,0.12);
+            color: #fff;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+        }
+
         .players-head {
             padding: 14px 20px;
             display: flex; justify-content: space-between; align-items: center;
@@ -971,6 +1022,10 @@ app.get('/', (req, res) => {
                     <div class="players-title">Игроки</div>
                     <div class="count-badge" id="count-badge">${players.length} онлайн</div>
                 </div>
+                <div class="mode-tabs" role="tablist">
+                    <button class="mode-tab active" data-mode="online" role="tab">В сети</button>
+                    <button class="mode-tab" data-mode="all" role="tab">Все</button>
+                </div>
                 <input class="search-input" id="player-search" placeholder="Поиск по нику..." autocomplete="off"/>
             </div>
             <div class="players-grid" id="players-grid">
@@ -1219,43 +1274,85 @@ app.get('/', (req, res) => {
             trendSlot.innerHTML = buildTrendPill(trend);
         }
 
+        // ===== Mode switching (Online / All) =====
+        let currentMode = 'online'; // 'online' | 'all'
+        let allPlayersCache = null; // последний загруженный список "всех"
+        const modeTabs = document.querySelectorAll('.mode-tab');
+
+        modeTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const mode = tab.dataset.mode;
+                if (mode === currentMode) return;
+                currentMode = mode;
+                modeTabs.forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+                // Очищаем поиск при переключении чтобы не сбивать с толку
+                if (search.value) { search.value = ''; }
+                // Сразу же рендерим новый режим
+                refresh();
+            });
+        });
+
+        async function refreshOnline() {
+            const r = await fetch('/online', { cache: 'no-store' });
+            if (!r.ok) throw new Error('http ' + r.status);
+            const data = await r.json();
+
+            // Список рендерим только если активен режим online — иначе пользователь смотрит "Все"
+            if (currentMode === 'online') {
+                const players = (data.players || []).slice().sort((a, b) => b.lastSeen - a.lastSeen);
+                updatePlayersDom(players);
+                countBadge.textContent = players.length + ' онлайн';
+            }
+            // Hero и статы обновляем всегда, они не зависят от режима
+            updateHero((data.players || []).length, data.stats.trend || 0);
+
+            chartSlot.innerHTML = buildSparkline(data.stats.recent);
+            chartMeta.textContent = data.stats.peak24h && data.stats.peak24h.count > 0
+                ? 'пик ' + data.stats.peak24h.count + ' в ' + formatTime(data.stats.peak24h.t)
+                : '';
+
+            if (data.stats.record) {
+                recordValue.textContent = data.stats.record.count;
+                if (data.stats.record.timestamp) {
+                    const d = new Date(data.stats.record.timestamp);
+                    recordMeta.innerHTML =
+                        d.toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', day: 'numeric', month: 'short' })
+                        + '<br>' + d.toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', hour: '2-digit', minute: '2-digit' });
+                }
+            }
+            avgValue.textContent = (data.stats.last24h ?? 0).toFixed(1);
+            avgMeta.innerHTML = data.stats.peak24h && data.stats.peak24h.count > 0
+                ? 'пик ' + data.stats.peak24h.count + '<br>в ' + formatTime(data.stats.peak24h.t)
+                : 'нет<br>данных';
+            allTimeValue.textContent = (data.stats.allTime ?? 0).toFixed(1);
+            if (data.stats.totalSamples != null) {
+                allTimeMeta.innerHTML = data.stats.totalSamples.toLocaleString('ru-RU') + '<br>замеров';
+            }
+
+            const top = data.top || [];
+            podiumSlot.innerHTML = buildPodiumCard(top[1], 2) + buildPodiumCard(top[0], 1) + buildPodiumCard(top[2], 3);
+        }
+
+        async function refreshAll() {
+            const r = await fetch('/players/all', { cache: 'no-store' });
+            if (!r.ok) throw new Error('http ' + r.status);
+            const data = await r.json();
+            allPlayersCache = data.players || [];
+            if (currentMode === 'all') {
+                updatePlayersDom(allPlayersCache);
+                const onlineCount = allPlayersCache.filter(p => p.online).length;
+                countBadge.textContent = data.total + ' всего · ' + onlineCount + ' онлайн';
+            }
+        }
+
         async function refresh() {
             try {
                 liveBadge.classList.add('refreshing');
-                const r = await fetch('/online', { cache: 'no-store' });
-                if (!r.ok) throw new Error('http ' + r.status);
-                const data = await r.json();
-
-                const players = (data.players || []).slice().sort((a, b) => b.lastSeen - a.lastSeen);
-                updatePlayersDom(players);
-                updateHero(players.length, data.stats.trend || 0);
-                countBadge.textContent = players.length + ' онлайн';
-
-                chartSlot.innerHTML = buildSparkline(data.stats.recent);
-                chartMeta.textContent = data.stats.peak24h && data.stats.peak24h.count > 0
-                    ? 'пик ' + data.stats.peak24h.count + ' в ' + formatTime(data.stats.peak24h.t)
-                    : '';
-
-                if (data.stats.record) {
-                    recordValue.textContent = data.stats.record.count;
-                    if (data.stats.record.timestamp) {
-                        const d = new Date(data.stats.record.timestamp);
-                        recordMeta.innerHTML =
-                            d.toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', day: 'numeric', month: 'short' })
-                            + '<br>' + d.toLocaleString('ru-RU', { timeZone: 'Asia/Almaty', hour: '2-digit', minute: '2-digit' });
-                    }
+                // /online нужен всегда (для статов и подиума), /players/all — только в режиме "Все"
+                await refreshOnline();
+                if (currentMode === 'all') {
+                    await refreshAll();
                 }
-                avgValue.textContent = (data.stats.last24h ?? 0).toFixed(1);
-                avgMeta.innerHTML = data.stats.peak24h && data.stats.peak24h.count > 0
-                    ? 'пик ' + data.stats.peak24h.count + '<br>в ' + formatTime(data.stats.peak24h.t)
-                    : 'нет<br>данных';
-                allTimeValue.textContent = (data.stats.allTime ?? 0).toFixed(1);
-                if (data.stats.totalSamples != null) {
-                    allTimeMeta.innerHTML = data.stats.totalSamples.toLocaleString('ru-RU') + '<br>замеров';
-                }
-
-                const top = data.top || [];
-                podiumSlot.innerHTML = buildPodiumCard(top[1], 2) + buildPodiumCard(top[0], 1) + buildPodiumCard(top[2], 3);
             } catch (e) {
                 // mute network errors, will retry
             } finally {
